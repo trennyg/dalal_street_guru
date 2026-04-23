@@ -32,7 +32,7 @@ _is_refreshing = False
 _refresh_progress = {"done": 0, "total": 0}
 _sector_averages = {}
 
-# ─── Fetch NSE symbol list automatically ─────────────────────────────────────────
+#  Fetch NSE symbol list automatically 
 def fetch_nse_symbols() -> list:
     """Download complete NSE equity list and return symbols."""
     try:
@@ -56,13 +56,13 @@ def fetch_nse_symbols() -> list:
                 series = row.get("SERIES", "").strip()
                 if sym and series == "EQ":  # Only equity, not derivatives
                     symbols.append(sym)
-            print(f"✓ Fetched {len(symbols)} NSE symbols")
+            print(f" Fetched {len(symbols)} NSE symbols")
             return symbols
         else:
-            print(f"✗ NSE CSV fetch failed: {r.status_code}")
+            print(f" NSE CSV fetch failed: {r.status_code}")
             return []
     except Exception as e:
-        print(f"✗ NSE symbol fetch error: {e}")
+        print(f" NSE symbol fetch error: {e}")
         return []
 
 
@@ -262,7 +262,7 @@ def fetch_screener(symbol: str) -> dict:
     return {}
 
 
-# ─── Sector averages computation ─────────────────────────────────────────────────
+#  Sector averages computation 
 def compute_sector_averages(cache: dict) -> dict:
     """Compute average metrics per sector from cached data."""
     sector_data = {}
@@ -290,11 +290,11 @@ def compute_sector_averages(cache: dict) -> dict:
     return averages
 
 
-# ─── All Investor Profiles ────────────────────────────────────────────────────────
+#  All Investor Profiles 
 INVESTOR_PROFILES = {
-    # ── Indian Legends ──
+    #  Indian Legends 
     "rj": {
-        "name": "Rakesh Jhunjhunwala", "avatar": "🐂", "category": "Indian Legend",
+        "name": "Rakesh Jhunjhunwala", "avatar": "", "category": "Indian Legend",
         "focus": "India Growth Compounder", "color": "#f59e0b",
         "portfolio_size": 18, "sizing_style": "conviction_weighted",
         "bio": "Known as India's Warren Buffett and the 'Big Bull', Rakesh Jhunjhunwala (1960-2022) turned ₹5,000 into over ₹40,000 crore through a legendary 35-year career. He started trading in 1985 with borrowed money and built one of India's most celebrated investment track records.",
@@ -307,7 +307,7 @@ INVESTOR_PROFILES = {
         "description": "High ROE compounders, India growth story, high promoter conviction, buy on dips",
     },
     "ramesh_damani": {
-        "name": "Ramesh Damani", "avatar": "🎯", "category": "Indian Legend",
+        "name": "Ramesh Damani", "avatar": "", "category": "Indian Legend",
         "focus": "Contrarian Deep Value", "color": "#ef4444",
         "portfolio_size": 12, "sizing_style": "equal_weight",
         "bio": "Ramesh Damani is a BSE member and veteran investor who has been investing in Indian markets since 1989. Known for his contrarian calls and ability to find value in out-of-favour sectors, he is one of India's most respected market voices.",
@@ -320,7 +320,7 @@ INVESTOR_PROFILES = {
         "description": "Deep value, contrarian, out-of-favour sectors, 5-7 year patience",
     },
     "vijay_kedia": {
-        "name": "Vijay Kedia", "avatar": "💡", "category": "Indian Legend",
+        "name": "Vijay Kedia", "avatar": "", "category": "Indian Legend",
         "focus": "SMILE — Niche Leaders", "color": "#8b5cf6",
         "portfolio_size": 6, "sizing_style": "very_concentrated",
         "bio": "Vijay Kedia started investing with ₹25,000 and has built a multi-hundred crore portfolio through highly concentrated bets on niche market leaders. Known for his SMILE framework and willingness to hold stocks for a decade or more.",
@@ -333,7 +333,7 @@ INVESTOR_PROFILES = {
         "description": "SMILE framework — small/mid cap niche monopolies, large opportunity, great management",
     },
     "porinju": {
-        "name": "Porinju Veliyath", "avatar": "🔍", "category": "Indian Legend",
+        "name": "Porinju Veliyath", "avatar": "", "category": "Indian Legend",
         "focus": "Smallcap Contrarian", "color": "#ec4899",
         "portfolio_size": 25, "sizing_style": "equal_weight",
         "bio": "Porinju Veliyath, founder of Equity Intelligence India, is known as the 'Smallcap King'. Starting as a sub-broker, he built a fund that delivered exceptional returns by investing in deeply undervalued small caps ignored by institutions.",
@@ -346,7 +346,7 @@ INVESTOR_PROFILES = {
         "description": "Deep smallcap, turnaround stories, beaten-down stocks ignored by institutions",
     },
     "ashish_kacholia": {
-        "name": "Ashish Kacholia", "avatar": "🚀", "category": "Indian Legend",
+        "name": "Ashish Kacholia", "avatar": "", "category": "Indian Legend",
         "focus": "Emerging Compounders", "color": "#84cc16",
         "portfolio_size": 20, "sizing_style": "equal_weight",
         "bio": "Ashish Kacholia, often called the 'Big Whale' of smallcap investing, is known for identifying emerging compounders before they become mainstream. He has a remarkable track record of finding multi-baggers in the smallcap space.",
@@ -359,7 +359,7 @@ INVESTOR_PROFILES = {
         "description": "Smallcap quality growth, scalable businesses, emerging sector leaders",
     },
     "dolly_khanna": {
-        "name": "Dolly Khanna", "avatar": "💎", "category": "Indian Legend",
+        "name": "Dolly Khanna", "avatar": "", "category": "Indian Legend",
         "focus": "Cyclical Turnarounds", "color": "#f472b6",
         "portfolio_size": 25, "sizing_style": "equal_weight",
         "bio": "Dolly Khanna is one of India's most successful retail investors, managing investments alongside her husband Rajiv Khanna. Known for her ability to identify cyclical businesses at turnaround points, she has consistently found multi-baggers in sectors others ignore.",
@@ -372,7 +372,7 @@ INVESTOR_PROFILES = {
         "description": "Under-the-radar cyclicals, turnaround stories, ignored smallcaps with pricing power",
     },
     "chandrakant_sampat": {
-        "name": "Chandrakant Sampat", "avatar": "📜", "category": "Indian Legend",
+        "name": "Chandrakant Sampat", "avatar": "", "category": "Indian Legend",
         "focus": "Original Indian Value", "color": "#a78bfa",
         "portfolio_size": 10, "sizing_style": "conviction_weighted",
         "bio": "Chandrakant Sampat (1928-2015) is considered India's original value investor, predating even Buffett's fame in India. He invested in Hindustan Unilever and similar consumer monopolies decades before it became fashionable. A true pioneer of long-term value investing in India.",
@@ -385,7 +385,7 @@ INVESTOR_PROFILES = {
         "description": "India's original Buffett — consumer monopolies, debt-free, decades-long compounders",
     },
     "radhakishan_damani": {
-        "name": "Radhakishan Damani", "avatar": "🛒", "category": "Indian Legend",
+        "name": "Radhakishan Damani", "avatar": "", "category": "Indian Legend",
         "focus": "Retail & Consumer Value", "color": "#fb923c",
         "portfolio_size": 8, "sizing_style": "very_concentrated",
         "bio": "Radhakishan Damani, founder of DMart and Avenue Supermarts, is one of India's wealthiest individuals. Before DMart, he was a legendary investor known for his contrarian calls and deep value approach in the 1990s and 2000s.",
@@ -398,7 +398,7 @@ INVESTOR_PROFILES = {
         "description": "Consumer + retail lens, EDLP businesses, essential products, low debt",
     },
     "raamdeo_agrawal": {
-        "name": "Raamdeo Agrawal", "avatar": "📋", "category": "Indian Legend",
+        "name": "Raamdeo Agrawal", "avatar": "", "category": "Indian Legend",
         "focus": "QGLP — Quality Growth", "color": "#60a5fa",
         "portfolio_size": 20, "sizing_style": "conviction_weighted",
         "bio": "Raamdeo Agrawal, co-founder of Motilal Oswal Financial Services, developed the QGLP framework that has guided billions in Indian equity investment. A chartered accountant turned investor, he has compounded wealth at >25% CAGR for over 30 years.",
@@ -411,7 +411,7 @@ INVESTOR_PROFILES = {
         "description": "QGLP pioneer — Quality + Growth + Longevity + Price framework",
     },
     "sanjay_bakshi": {
-        "name": "Sanjay Bakshi", "avatar": "🎓", "category": "Indian Legend",
+        "name": "Sanjay Bakshi", "avatar": "", "category": "Indian Legend",
         "focus": "Behavioral Value Investing", "color": "#818cf8",
         "portfolio_size": 15, "sizing_style": "conviction_weighted",
         "bio": "Sanjay Bakshi is a professor at MDI Gurgaon and founder of ValueQuest Capital. A disciple of Ben Graham and Charlie Munger, he brings academic rigor to value investing and is known for his deep research approach.",
@@ -424,7 +424,7 @@ INVESTOR_PROFILES = {
         "description": "Academic value investing, behavioral finance lens, moaty businesses at temporary discount",
     },
     "kenneth_andrade": {
-        "name": "Kenneth Andrade (Old Bridge)", "avatar": "🌉", "category": "Indian Legend",
+        "name": "Kenneth Andrade (Old Bridge)", "avatar": "", "category": "Indian Legend",
         "focus": "Asset-Light Capital Efficiency", "color": "#34d399",
         "portfolio_size": 20, "sizing_style": "equal_weight",
         "bio": "Kenneth Andrade, founder of Old Bridge Capital, is known for his contrarian, asset-light investment philosophy. He ran IDFC Premier Equity Fund before starting Old Bridge, delivering exceptional returns.",
@@ -437,7 +437,7 @@ INVESTOR_PROFILES = {
         "description": "Asset-light businesses, high capital efficiency, ROCE focus, contrarian sector rotation",
     },
     "manish_kejriwal": {
-        "name": "Manish Kejriwal (Amansa Capital)", "avatar": "🌐", "category": "Indian Legend",
+        "name": "Manish Kejriwal (Amansa Capital)", "avatar": "", "category": "Indian Legend",
         "focus": "Quality Growth PE Style", "color": "#f0abfc",
         "portfolio_size": 15, "sizing_style": "conviction_weighted",
         "bio": "Manish Kejriwal founded Amansa Capital after stints at Goldman Sachs and Temasek. He brings a private equity mindset to public market investing — long holding periods, deep business analysis, focus on quality compounders.",
@@ -449,9 +449,9 @@ INVESTOR_PROFILES = {
         "rebalance_style": "Long-term 5-10 year holds. Very low portfolio turnover.",
         "description": "Private equity mindset in public markets, world-class management, 5-10 year holds",
     },
-    # ── Global Legends ──
+    #  Global Legends 
     "buffett": {
-        "name": "Warren Buffett", "avatar": "🧠", "category": "Global Legend",
+        "name": "Warren Buffett", "avatar": "", "category": "Global Legend",
         "focus": "Quality at Fair Price", "color": "#3b82f6",
         "portfolio_size": 10, "sizing_style": "very_concentrated",
         "bio": "Warren Buffett, the 'Oracle of Omaha', is widely considered the greatest investor of all time. Starting with Graham's deep value approach, he evolved to buying wonderful businesses at fair prices under Charlie Munger's influence. His Berkshire Hathaway has compounded at ~20% CAGR for 58 years.",
@@ -464,7 +464,7 @@ INVESTOR_PROFILES = {
         "description": "Durable moat, consistent high ROE, low debt, buy below intrinsic value",
     },
     "peter_lynch": {
-        "name": "Peter Lynch", "avatar": "📈", "category": "Global Legend",
+        "name": "Peter Lynch", "avatar": "", "category": "Global Legend",
         "focus": "GARP — Growth at Reasonable Price", "color": "#06b6d4",
         "portfolio_size": 30, "sizing_style": "equal_weight",
         "bio": "Peter Lynch managed Fidelity's Magellan Fund from 1977-1990, achieving 29.2% annual returns — the best 13-year run of any mutual fund in history. He popularized the concept of 'invest in what you know' and the PEG ratio.",
@@ -477,7 +477,7 @@ INVESTOR_PROFILES = {
         "description": "PEG ratio focus, invest in what you know, hidden gems in boring sectors",
     },
     "ben_graham": {
-        "name": "Benjamin Graham", "avatar": "⚖️", "category": "Global Legend",
+        "name": "Benjamin Graham", "avatar": "", "category": "Global Legend",
         "focus": "Deep Value / Margin of Safety", "color": "#64748b",
         "portfolio_size": 25, "sizing_style": "equal_weight",
         "bio": "Benjamin Graham, the 'Father of Value Investing', wrote The Intelligent Investor and Security Analysis — the bibles of value investing. Warren Buffett called him the second most influential person in his life after his father. Graham survived the 1929 crash and developed a systematic approach to finding undervalued stocks.",
@@ -490,7 +490,7 @@ INVESTOR_PROFILES = {
         "description": "Buy below book value, wide margin of safety, net-net stocks, absolute value",
     },
     "charlie_munger": {
-        "name": "Charlie Munger", "avatar": "🦁", "category": "Global Legend",
+        "name": "Charlie Munger", "avatar": "", "category": "Global Legend",
         "focus": "Wonderful Company at Fair Price", "color": "#0ea5e9",
         "portfolio_size": 5, "sizing_style": "very_concentrated",
         "bio": "Charlie Munger, Buffett's partner at Berkshire Hathaway for 60 years, was perhaps the most intellectually rigorous investor of his generation. He transformed Buffett from a Graham-style deep value investor to a quality compounder investor. He managed Daily Journal Corporation's portfolio well into his 90s.",
@@ -503,7 +503,7 @@ INVESTOR_PROFILES = {
         "description": "Ultra-concentrated wonderful companies, ROCE focus, hold forever",
     },
     "phil_fisher": {
-        "name": "Philip Fisher", "avatar": "🔭", "category": "Global Legend",
+        "name": "Philip Fisher", "avatar": "", "category": "Global Legend",
         "focus": "Scuttlebutt Growth Investor", "color": "#14b8a6",
         "portfolio_size": 12, "sizing_style": "conviction_weighted",
         "bio": "Philip Fisher wrote Common Stocks and Uncommon Profits (1958), one of the most influential investment books ever written. His scuttlebutt method — researching companies through industry contacts, suppliers, customers, and competitors — was revolutionary. Warren Buffett said he was '85% Graham and 15% Fisher'.",
@@ -515,9 +515,9 @@ INVESTOR_PROFILES = {
         "rebalance_style": "Long-term growth holds. Exits when growth thesis breaks.",
         "description": "Outstanding growth companies, deep research scuttlebutt method, management quality",
     },
-    # ── Indian Fund Houses ──
+    #  Indian Fund Houses 
     "parag_parikh": {
-        "name": "Parag Parikh Flexi Cap", "avatar": "🌍", "category": "Indian Fund",
+        "name": "Parag Parikh Flexi Cap", "avatar": "", "category": "Indian Fund",
         "focus": "Owner-Operator Quality", "color": "#10b981",
         "portfolio_size": 22, "sizing_style": "equal_weight",
         "bio": "Parag Parikh Financial Advisory Services (PPFAS) manages one of India's most respected mutual funds. Founded by the late Parag Parikh, the fund is known for its low churn, behavioral investing approach, and willingness to hold cash when markets are overvalued.",
@@ -530,7 +530,7 @@ INVESTOR_PROFILES = {
         "description": "Pricing power, owner-operator promoters, low churn, behavioral discipline",
     },
     "marcellus": {
-        "name": "Marcellus Investment (Saurabh Mukherjea)", "avatar": "🔬", "category": "Indian Fund",
+        "name": "Marcellus Investment (Saurabh Mukherjea)", "avatar": "", "category": "Indian Fund",
         "focus": "Forensic Quality Only", "color": "#06b6d4",
         "portfolio_size": 12, "sizing_style": "equal_weight",
         "bio": "Saurabh Mukherjea founded Marcellus Investment Managers in 2018 after leading Ambit Capital's research. His Consistent Compounders Portfolio (CCP) uses forensic accounting screens to identify companies with clean books and consistently high ROCE.",
@@ -543,7 +543,7 @@ INVESTOR_PROFILES = {
         "description": "Zero debt, very high ROCE, clean accounts, forensic quality filter",
     },
     "motilal_qglp": {
-        "name": "Motilal Oswal QGLP", "avatar": "📊", "category": "Indian Fund",
+        "name": "Motilal Oswal QGLP", "avatar": "", "category": "Indian Fund",
         "focus": "Quality + Growth + Longevity + Price", "color": "#f97316",
         "portfolio_size": 20, "sizing_style": "conviction_weighted",
         "bio": "Motilal Oswal Asset Management applies the QGLP framework pioneered by Raamdeo Agrawal. The framework has been refined over 30 years and guides one of India's largest equity PMS businesses.",
@@ -556,7 +556,7 @@ INVESTOR_PROFILES = {
         "description": "All four QGLP criteria must be met — quality, growth, longevity, price",
     },
     "nippon_smallcap": {
-        "name": "Nippon India Small Cap", "avatar": "🌱", "category": "Indian Fund",
+        "name": "Nippon India Small Cap", "avatar": "", "category": "Indian Fund",
         "focus": "High Growth Small Caps", "color": "#22d3ee",
         "portfolio_size": 60, "sizing_style": "equal_weight",
         "bio": "Nippon India Small Cap Fund is one of India's largest small cap funds with over ₹50,000 Cr AUM. It invests across the small cap spectrum with a focus on growth businesses in emerging sectors.",
@@ -569,7 +569,7 @@ INVESTOR_PROFILES = {
         "description": "Diversified small cap growth, emerging sector leaders, high growth businesses",
     },
     "mirae_asset": {
-        "name": "Mirae Asset India", "avatar": "🏆", "category": "Indian Fund",
+        "name": "Mirae Asset India", "avatar": "", "category": "Indian Fund",
         "focus": "Quality Growth Large Cap", "color": "#a3e635",
         "portfolio_size": 55, "sizing_style": "market_cap_weighted",
         "bio": "Mirae Asset Investment Managers India is the Indian arm of South Korean giant Mirae Asset. Known for disciplined, process-driven investing, Mirae India Equity has consistently outperformed its benchmark.",
@@ -582,7 +582,7 @@ INVESTOR_PROFILES = {
         "description": "Sector leaders, quality businesses, consistent earnings growth, risk management",
     },
     "hdfc_mf": {
-        "name": "HDFC Mutual Fund (Prashant Jain Era)", "avatar": "🏦", "category": "Indian Fund",
+        "name": "HDFC Mutual Fund (Prashant Jain Era)", "avatar": "", "category": "Indian Fund",
         "focus": "Value + Quality Blend", "color": "#fb923c",
         "portfolio_size": 50, "sizing_style": "conviction_weighted",
         "bio": "Under Prashant Jain (2003-2022), HDFC Equity Fund became one of India's most respected equity funds. Known for contrarian calls — buying public sector banks and infrastructure when others avoided them — Jain delivered exceptional long-term returns through a blend of value and quality.",
@@ -595,7 +595,7 @@ INVESTOR_PROFILES = {
         "description": "Value + quality blend, contrarian at times, patient long-term capital",
     },
     "anand_rathi": {
-        "name": "Anand Rathi Wealth", "avatar": "⚡", "category": "Indian Fund",
+        "name": "Anand Rathi Wealth", "avatar": "", "category": "Indian Fund",
         "focus": "Wealth Preservation + Growth", "color": "#fbbf24",
         "portfolio_size": 25, "sizing_style": "risk_weighted",
         "bio": "Anand Rathi Wealth is one of India's leading wealth management firms, focused on HNI and ultra-HNI clients. Their investment approach prioritizes capital preservation alongside growth, with heavy emphasis on asset allocation.",
@@ -608,7 +608,7 @@ INVESTOR_PROFILES = {
         "description": "HNI wealth management, large cap bias, capital preservation, dividend focus",
     },
     "white_oak": {
-        "name": "White Oak Capital (Prashant Khemka)", "avatar": "🌳", "category": "Indian Fund",
+        "name": "White Oak Capital (Prashant Khemka)", "avatar": "", "category": "Indian Fund",
         "focus": "Earnings Quality Growth", "color": "#86efac",
         "portfolio_size": 30, "sizing_style": "equal_weight",
         "bio": "Prashant Khemka founded White Oak Capital after a stellar career at Goldman Sachs Asset Management where he managed India equity. White Oak focuses on a rigorous bottom-up approach emphasizing earnings quality and return on equity.",
@@ -621,7 +621,7 @@ INVESTOR_PROFILES = {
         "description": "Earnings quality, ROE without leverage, GARP approach, Goldman Sachs rigor",
     },
     "enam": {
-        "name": "Enam Securities / Vallabh Bhansali", "avatar": "🛡️", "category": "Indian Fund",
+        "name": "Enam Securities / Vallabh Bhansali", "avatar": "", "category": "Indian Fund",
         "focus": "Forensic Long-Term Quality", "color": "#c4b5fd",
         "portfolio_size": 15, "sizing_style": "conviction_weighted",
         "bio": "Enam Securities, founded by Vallabh Bhansali and Nemish Shah, is one of India's most respected institutional brokers and investors. Known for deep fundamental research and integrity-first approach, Enam's investment calls have created generational wealth for clients.",
@@ -634,7 +634,7 @@ INVESTOR_PROFILES = {
         "description": "Management integrity first, debt-free, forensic accounting, 10+ year horizon",
     },
     "nemish_shah": {
-        "name": "Nemish Shah (Enam Co-Founder)", "avatar": "🎯", "category": "Indian Fund",
+        "name": "Nemish Shah (Enam Co-Founder)", "avatar": "", "category": "Indian Fund",
         "focus": "Consumer & Pharma Quality", "color": "#e879f9",
         "portfolio_size": 15, "sizing_style": "conviction_weighted",
         "bio": "Nemish Shah co-founded Enam Securities with Vallabh Bhansali and is known for his deep expertise in consumer and pharmaceutical businesses. His investment thesis centres on businesses selling essential products with strong brand moats.",
@@ -647,7 +647,7 @@ INVESTOR_PROFILES = {
         "description": "Consumer & pharma specialist, brand moats, pricing power, debt-free",
     },
     "ask_investment": {
-        "name": "ASK Investment Managers", "avatar": "💰", "category": "Indian Fund",
+        "name": "ASK Investment Managers", "avatar": "", "category": "Indian Fund",
         "focus": "Quality Large Cap PMS", "color": "#fdba74",
         "portfolio_size": 20, "sizing_style": "conviction_weighted",
         "bio": "ASK Investment Managers is one of India's largest PMS providers with over ₹70,000 Cr in AUM. Known for their quality-focused approach and wealth preservation philosophy for HNI clients.",
@@ -660,7 +660,7 @@ INVESTOR_PROFILES = {
         "description": "Quality large cap PMS, wealth preservation, consistent earnings, low leverage",
     },
     "carnelian": {
-        "name": "Carnelian Asset (Vikas Khemani)", "avatar": "💫", "category": "Indian Fund",
+        "name": "Carnelian Asset (Vikas Khemani)", "avatar": "", "category": "Indian Fund",
         "focus": "Emerging Sector Leaders", "color": "#67e8f9",
         "portfolio_size": 20, "sizing_style": "equal_weight",
         "bio": "Vikas Khemani founded Carnelian Asset Management after leading Edelweiss Securities. His philosophy centres on identifying emerging compounders — businesses in sectors with strong tailwinds before they become mainstream.",
@@ -673,7 +673,7 @@ INVESTOR_PROFILES = {
         "description": "Emerging compounders, structural sector tailwinds, transitioning small to mid cap",
     },
     "murugappa": {
-        "name": "Murugappa Group Style", "avatar": "🏭", "category": "Indian Fund",
+        "name": "Murugappa Group Style", "avatar": "", "category": "Indian Fund",
         "focus": "South India Industrial Quality", "color": "#fcd34d",
         "portfolio_size": 15, "sizing_style": "equal_weight",
         "bio": "The Murugappa Group is a 125-year-old Chennai-based conglomerate with businesses in fertilizers, engineering, finance, and consumer products. Their investment philosophy reflects generations of industrial wealth creation — patient, conservative, quality-focused.",
@@ -688,7 +688,7 @@ INVESTOR_PROFILES = {
 }
 
 
-# ─── Portfolio sizing logic per profile ──────────────────────────────────────────
+#  Portfolio sizing logic per profile 
 def get_portfolio_allocation(profile_id: str, stocks: list, capital: float) -> dict:
     """Generate position-sized portfolio for a given investor profile."""
     profile = INVESTOR_PROFILES.get(profile_id, {})
@@ -808,7 +808,7 @@ def get_entry_strategy(profile_id: str) -> str:
     return strategies.get(profile_id, "Invest systematically over 3-6 months to average out entry prices. Market timing is less important than business quality.")
 
 
-# ─── Profile scoring ──────────────────────────────────────────────────────────────
+#  Profile scoring 
 def score_profile(d: dict, profile: str) -> dict:
     s, r = 0, []
     def pct(v): return v*100 if v is not None else None
@@ -889,10 +889,10 @@ def score_profile(d: dict, profile: str) -> dict:
         g_met=roce and roce>=20
         p_met=pe and 0<pe<45
         l_met=ph and ph>=40
-        if q_met: s+=30;r.append("Quality ✓")
-        if g_met: s+=25;r.append(f"Growth ✓ ROCE {roce:.1f}%")
-        if p_met: s+=25;r.append(f"Price ✓ P/E {pe:.1f}x")
-        if l_met: s+=20;r.append(f"Longevity ✓ promoter {ph:.1f}%")
+        if q_met: s+=30;r.append("Quality ")
+        if g_met: s+=25;r.append(f"Growth  ROCE {roce:.1f}%")
+        if p_met: s+=25;r.append(f"Price  P/E {pe:.1f}x")
+        if l_met: s+=20;r.append(f"Longevity  promoter {ph:.1f}%")
     elif profile=="sanjay_bakshi":
         if roe and roe>=20: s+=25;r.append(f"Quality moat ROE {roe:.1f}%")
         elif roe and roe>=15: s+=15
@@ -980,10 +980,10 @@ def score_profile(d: dict, profile: str) -> dict:
         g_met=roce and roce>=20
         p_met=pe and 0<pe<45
         l_met=ph and ph>=40
-        if q_met: s+=30;r.append("Quality ✓ (ROE + margins)")
-        if g_met: s+=25;r.append(f"Growth ✓ ROCE {roce:.1f}%")
-        if p_met: s+=25;r.append(f"Price ✓ P/E {pe:.1f}x")
-        if l_met: s+=20;r.append(f"Longevity ✓ promoter {ph:.1f}%")
+        if q_met: s+=30;r.append("Quality  (ROE + margins)")
+        if g_met: s+=25;r.append(f"Growth  ROCE {roce:.1f}%")
+        if p_met: s+=25;r.append(f"Price  P/E {pe:.1f}x")
+        if l_met: s+=20;r.append(f"Longevity  promoter {ph:.1f}%")
     elif profile=="nippon_smallcap":
         if 0<mc_cr<8000: s+=30;r.append(f"Small cap ₹{mc_cr:.0f}Cr")
         elif mc_cr<15000: s+=15
@@ -1074,7 +1074,7 @@ def get_matching_profiles(d: dict) -> list:
     return results[:3]
 
 
-# ─── Standard scoring ─────────────────────────────────────────────────────────────
+#  Standard scoring 
 def to_pct(val): return val*100 if val is not None else None
 
 def score_buffett_std(d):
@@ -1263,7 +1263,7 @@ def build_entry(symbol, raw):
     }
 
 
-# ─── Disk cache ───────────────────────────────────────────────────────────────────
+#  Disk cache 
 def save_cache_to_disk():
     try:
         with _cache_lock:
@@ -1271,8 +1271,8 @@ def save_cache_to_disk():
         with open(CACHE_FILE,"w") as f: json.dump(data,f)
         # Save sector averages
         with open(SECTOR_CACHE_FILE,"w") as f: json.dump(_sector_averages,f)
-        print(f"✓ Saved {len(_cache)} stocks to disk")
-    except Exception as e: print(f"✗ Save failed: {e}")
+        print(f" Saved {len(_cache)} stocks to disk")
+    except Exception as e: print(f" Save failed: {e}")
 
 def load_cache_from_disk():
     global _cache,_cache_time,_sector_averages
@@ -1288,12 +1288,12 @@ def load_cache_from_disk():
             with open(SECTOR_CACHE_FILE,"r") as f:
                 _sector_averages=json.load(f)
         age_h=(datetime.now()-_cache_time).total_seconds()/3600
-        print(f"✓ Loaded disk cache: {len(stocks)} stocks, {age_h:.1f}h old")
+        print(f" Loaded disk cache: {len(stocks)} stocks, {age_h:.1f}h old")
         return True
-    except Exception as e: print(f"✗ Load failed: {e}"); return False
+    except Exception as e: print(f" Load failed: {e}"); return False
 
 
-# ─── Cache refresh ────────────────────────────────────────────────────────────────
+#  Cache refresh 
 def refresh_cache():
     global _cache,_cache_time,_is_refreshing,_refresh_progress,_sector_averages
     if _is_refreshing: return
@@ -1353,9 +1353,9 @@ def refresh_cache():
                 new_cache[symbol]=entry
                 roe_d=f"{to_pct(raw.get('roe')):.1f}%" if raw.get("roe") else "-"
                 opm_d=f"{to_pct(raw.get('operating_margins')):.1f}%" if raw.get("operating_margins") else "-"
-                print(f"✓ score={scoring['composite']} ROE={roe_d} OPM={opm_d}")
+                print(f" score={scoring['composite']} ROE={roe_d} OPM={opm_d}")
             else:
-                print("✗ no data")
+                print(" no data")
             _refresh_progress["done"]=i+1
 
             # Intermediate save every 50
@@ -1368,7 +1368,7 @@ def refresh_cache():
 
             time.sleep(2)
         except Exception as e:
-            print(f"✗ {e}"); _refresh_progress["done"]=i+1; time.sleep(2)
+            print(f" {e}"); _refresh_progress["done"]=i+1; time.sleep(2)
 
     # Final sector averages computation
     sector_avgs = compute_sector_averages(new_cache)
@@ -1382,7 +1382,7 @@ def refresh_cache():
         _sector_averages=sector_avgs
 
     save_cache_to_disk()
-    print(f"\n✓ Cache complete: {len(new_cache)} stocks at {_cache_time.strftime('%H:%M:%S')}\n")
+    print(f"\n Cache complete: {len(new_cache)} stocks at {_cache_time.strftime('%H:%M:%S')}\n")
     _is_refreshing=False
 
 
@@ -1404,7 +1404,7 @@ async def startup():
         threading.Thread(target=refresh_cache,daemon=True).start()
 
 
-# ─── Routes ──────────────────────────────────────────────────────────────────────
+#  Routes 
 @app.get("/")
 def root():
     return {
@@ -1415,6 +1415,17 @@ def root():
         "investor_profiles":len(INVESTOR_PROFILES),
         "sectors_indexed":len(_sector_averages),
     }
+
+@app.get("/api/symbols")
+def get_symbols():
+    """Return all cached symbols and company names for autocomplete."""
+    with _cache_lock:
+        result = [
+            {"symbol": s["symbol"], "company_name": s.get("company_name", s["symbol"]), "sector": s.get("sector","Unknown")}
+            for s in _cache.values()
+        ]
+    result.sort(key=lambda x: x["symbol"])
+    return {"symbols": result, "count": len(result)}
 
 @app.get("/api/cache/status")
 def cache_status():

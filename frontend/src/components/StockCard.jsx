@@ -9,15 +9,15 @@ const CONVICTION_CLASS = {
 };
 
 const PROFILE_AVATARS = {
-  buffett:"🧠", rj:"🐂", ramesh_damani:"🎯", vijay_kedia:"💡",
-  parag_parikh:"🌍", marcellus:"🔬", motilal_qglp:"📊",
-  porinju:"🔍", ashish_kacholia:"🚀", dolly_khanna:"💎",
-  chandrakant_sampat:"📜", radhakishan_damani:"🛒", raamdeo_agrawal:"📋",
-  sanjay_bakshi:"🎓", kenneth_andrade:"🌉", manish_kejriwal:"🌐",
-  peter_lynch:"📈", ben_graham:"⚖️", charlie_munger:"🦁", phil_fisher:"🔭",
-  nippon_smallcap:"🌱", mirae_asset:"🏆", hdfc_mf:"🏦",
-  anand_rathi:"⚡", white_oak:"🌳", enam:"🛡️", nemish_shah:"🎯",
-  ask_investment:"💰", carnelian:"💫", murugappa:"🏭",
+  buffett:"WB", rj:"RJ", ramesh_damani:"RD", vijay_kedia:"VK",
+  parag_parikh:"PP", marcellus:"MC", motilal_qglp:"MO",
+  porinju:"PV", ashish_kacholia:"AK", dolly_khanna:"DK",
+  chandrakant_sampat:"CS", radhakishan_damani:"RKD", raamdeo_agrawal:"RA",
+  sanjay_bakshi:"SB", kenneth_andrade:"KA", manish_kejriwal:"MK",
+  peter_lynch:"PL", ben_graham:"BG", charlie_munger:"CM", phil_fisher:"PF",
+  nippon_smallcap:"NS", mirae_asset:"MA", hdfc_mf:"HM",
+  anand_rathi:"AR", white_oak:"WO", enam:"EN", nemish_shah:"NSH",
+  ask_investment:"ASK", carnelian:"CA", murugappa:"MG",
 };
 
 function SectorTag({ value, sectorAvg, label, lowerBetter = false }) {
@@ -133,7 +133,7 @@ export default function StockCard({ stock, onClick, activeProfile }) {
         <div style={{ marginBottom: 12 }}>
           {stock.profile_reasons.map((r, i) => (
             <div key={i} style={{ fontSize: 11, color: "#16a34a", display: "flex", gap: 5, marginBottom: 3 }}>
-              <span>✓</span><span>{r}</span>
+              <span></span><span>{r}</span>
             </div>
           ))}
         </div>

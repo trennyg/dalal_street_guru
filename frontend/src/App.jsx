@@ -17,40 +17,40 @@ const TABS = [
 
 const INVESTOR_PROFILES = {
   "Indian Legend": [
-    { id: "rj", name: "Rakesh Jhunjhunwala", avatar: "🐂", focus: "India Growth Compounder", color: "#f59e0b" },
-    { id: "ramesh_damani", name: "Ramesh Damani", avatar: "🎯", focus: "Contrarian Deep Value", color: "#ef4444" },
-    { id: "vijay_kedia", name: "Vijay Kedia", avatar: "💡", focus: "SMILE — Niche Leaders", color: "#8b5cf6" },
-    { id: "porinju", name: "Porinju Veliyath", avatar: "🔍", focus: "Smallcap Contrarian", color: "#ec4899" },
-    { id: "ashish_kacholia", name: "Ashish Kacholia", avatar: "🚀", focus: "Emerging Compounders", color: "#84cc16" },
-    { id: "dolly_khanna", name: "Dolly Khanna", avatar: "💎", focus: "Cyclical Turnarounds", color: "#f472b6" },
-    { id: "chandrakant_sampat", name: "Chandrakant Sampat", avatar: "📜", focus: "Original Indian Value", color: "#a78bfa" },
-    { id: "radhakishan_damani", name: "Radhakishan Damani", avatar: "🛒", focus: "Retail & Consumer Value", color: "#fb923c" },
-    { id: "raamdeo_agrawal", name: "Raamdeo Agrawal", avatar: "📋", focus: "QGLP — Quality Growth", color: "#60a5fa" },
-    { id: "sanjay_bakshi", name: "Sanjay Bakshi", avatar: "🎓", focus: "Behavioral Value Investing", color: "#818cf8" },
-    { id: "kenneth_andrade", name: "Kenneth Andrade", avatar: "🌉", focus: "Asset-Light Capital Efficiency", color: "#34d399" },
-    { id: "manish_kejriwal", name: "Manish Kejriwal", avatar: "🌐", focus: "Quality Growth PE Style", color: "#f0abfc" },
+    { id: "rj", name: "Rakesh Jhunjhunwala", avatar: "RJ", focus: "India Growth Compounder", color: "#f59e0b" },
+    { id: "ramesh_damani", name: "Ramesh Damani", avatar: "RD", focus: "Contrarian Deep Value", color: "#ef4444" },
+    { id: "vijay_kedia", name: "Vijay Kedia", avatar: "VK", focus: "SMILE — Niche Leaders", color: "#8b5cf6" },
+    { id: "porinju", name: "Porinju Veliyath", avatar: "PV", focus: "Smallcap Contrarian", color: "#ec4899" },
+    { id: "ashish_kacholia", name: "Ashish Kacholia", avatar: "AK", focus: "Emerging Compounders", color: "#84cc16" },
+    { id: "dolly_khanna", name: "Dolly Khanna", avatar: "DK", focus: "Cyclical Turnarounds", color: "#f472b6" },
+    { id: "chandrakant_sampat", name: "Chandrakant Sampat", avatar: "CS", focus: "Original Indian Value", color: "#a78bfa" },
+    { id: "radhakishan_damani", name: "Radhakishan Damani", avatar: "RKD", focus: "Retail & Consumer Value", color: "#fb923c" },
+    { id: "raamdeo_agrawal", name: "Raamdeo Agrawal", avatar: "RA", focus: "QGLP — Quality Growth", color: "#60a5fa" },
+    { id: "sanjay_bakshi", name: "Sanjay Bakshi", avatar: "SB", focus: "Behavioral Value Investing", color: "#818cf8" },
+    { id: "kenneth_andrade", name: "Kenneth Andrade", avatar: "KA", focus: "Asset-Light Capital Efficiency", color: "#34d399" },
+    { id: "manish_kejriwal", name: "Manish Kejriwal", avatar: "MK", focus: "Quality Growth PE Style", color: "#f0abfc" },
   ],
   "Global Legend": [
-    { id: "buffett", name: "Warren Buffett", avatar: "🧠", focus: "Quality at Fair Price", color: "#3b82f6" },
-    { id: "peter_lynch", name: "Peter Lynch", avatar: "📈", focus: "GARP — Growth at Reasonable Price", color: "#06b6d4" },
-    { id: "ben_graham", name: "Benjamin Graham", avatar: "⚖️", focus: "Deep Value / Margin of Safety", color: "#64748b" },
-    { id: "charlie_munger", name: "Charlie Munger", avatar: "🦁", focus: "Wonderful Company at Fair Price", color: "#0ea5e9" },
-    { id: "phil_fisher", name: "Philip Fisher", avatar: "🔭", focus: "Scuttlebutt Growth Investor", color: "#14b8a6" },
+    { id: "buffett", name: "Warren Buffett", avatar: "WB", focus: "Quality at Fair Price", color: "#3b82f6" },
+    { id: "peter_lynch", name: "Peter Lynch", avatar: "PL", focus: "GARP — Growth at Reasonable Price", color: "#06b6d4" },
+    { id: "ben_graham", name: "Benjamin Graham", avatar: "BG", focus: "Deep Value / Margin of Safety", color: "#64748b" },
+    { id: "charlie_munger", name: "Charlie Munger", avatar: "CM", focus: "Wonderful Company at Fair Price", color: "#0ea5e9" },
+    { id: "phil_fisher", name: "Philip Fisher", avatar: "PF", focus: "Scuttlebutt Growth Investor", color: "#14b8a6" },
   ],
   "Indian Fund": [
-    { id: "parag_parikh", name: "Parag Parikh Flexi Cap", avatar: "🌍", focus: "Owner-Operator Quality", color: "#10b981" },
-    { id: "marcellus", name: "Marcellus Investment", avatar: "🔬", focus: "Forensic Quality Only", color: "#06b6d4" },
-    { id: "motilal_qglp", name: "Motilal Oswal QGLP", avatar: "📊", focus: "Quality + Growth + Longevity + Price", color: "#f97316" },
-    { id: "nippon_smallcap", name: "Nippon India Small Cap", avatar: "🌱", focus: "High Growth Small Caps", color: "#22d3ee" },
-    { id: "mirae_asset", name: "Mirae Asset India", avatar: "🏆", focus: "Quality Growth Large Cap", color: "#a3e635" },
-    { id: "hdfc_mf", name: "HDFC Mutual Fund", avatar: "🏦", focus: "Value + Quality Blend", color: "#fb923c" },
-    { id: "anand_rathi", name: "Anand Rathi Wealth", avatar: "⚡", focus: "Wealth Preservation + Growth", color: "#fbbf24" },
-    { id: "white_oak", name: "White Oak Capital", avatar: "🌳", focus: "Earnings Quality Growth", color: "#86efac" },
-    { id: "enam", name: "Enam / Vallabh Bhansali", avatar: "🛡️", focus: "Forensic + Long Term", color: "#c4b5fd" },
-    { id: "nemish_shah", name: "Nemish Shah", avatar: "🎯", focus: "Consumer & Pharma Quality", color: "#e879f9" },
-    { id: "ask_investment", name: "ASK Investment Managers", avatar: "💰", focus: "Quality Large Cap PMS", color: "#fdba74" },
-    { id: "carnelian", name: "Carnelian Asset", avatar: "💫", focus: "Emerging Sector Leaders", color: "#67e8f9" },
-    { id: "murugappa", name: "Murugappa Group Style", avatar: "🏭", focus: "South India Industrial Quality", color: "#fcd34d" },
+    { id: "parag_parikh", name: "Parag Parikh Flexi Cap", avatar: "PP", focus: "Owner-Operator Quality", color: "#10b981" },
+    { id: "marcellus", name: "Marcellus Investment", avatar: "MC", focus: "Forensic Quality Only", color: "#06b6d4" },
+    { id: "motilal_qglp", name: "Motilal Oswal QGLP", avatar: "MO", focus: "Quality + Growth + Longevity + Price", color: "#f97316" },
+    { id: "nippon_smallcap", name: "Nippon India Small Cap", avatar: "NS", focus: "High Growth Small Caps", color: "#22d3ee" },
+    { id: "mirae_asset", name: "Mirae Asset India", avatar: "MA", focus: "Quality Growth Large Cap", color: "#a3e635" },
+    { id: "hdfc_mf", name: "HDFC Mutual Fund", avatar: "HM", focus: "Value + Quality Blend", color: "#fb923c" },
+    { id: "anand_rathi", name: "Anand Rathi Wealth", avatar: "AR", focus: "Wealth Preservation + Growth", color: "#fbbf24" },
+    { id: "white_oak", name: "White Oak Capital", avatar: "WO", focus: "Earnings Quality Growth", color: "#86efac" },
+    { id: "enam", name: "Enam / Vallabh Bhansali", avatar: "EN", focus: "Forensic + Long Term", color: "#c4b5fd" },
+    { id: "nemish_shah", name: "Nemish Shah", avatar: "NSH", focus: "Consumer & Pharma Quality", color: "#e879f9" },
+    { id: "ask_investment", name: "ASK Investment Managers", avatar: "ASK", focus: "Quality Large Cap PMS", color: "#fdba74" },
+    { id: "carnelian", name: "Carnelian Asset", avatar: "CA", focus: "Emerging Sector Leaders", color: "#67e8f9" },
+    { id: "murugappa", name: "Murugappa Group Style", avatar: "MG", focus: "South India Industrial Quality", color: "#fcd34d" },
   ],
 };
 
@@ -216,10 +216,10 @@ export default function App() {
             ))}
           </div>
           <div className="nav-right">
-            <div className="mobile-tab-label">{TABS.find(t => t.id === tab)?.label}</div>
             <button className="hamburger-btn" onClick={() => setMenuOpen(o => !o)}>
               {menuOpen ? <X size={20} /> : <Menu size={20} />}
             </button>
+            <div className="mobile-tab-label">{TABS.find(t => t.id === tab)?.label}</div>
           </div>
         </div>
         {menuOpen && (
@@ -227,7 +227,7 @@ export default function App() {
             {TABS.map(({ id, label, icon: Icon }) => (
               <button key={id} className={`mobile-menu-item ${tab === id ? "active" : ""}`} onClick={() => switchTab(id)}>
                 <Icon size={16} /><span>{label}</span>
-                {tab === id && <span style={{ marginLeft: "auto", color: "#2563eb" }}>●</span>}
+                {tab === id && <span style={{ marginLeft: "auto", color: "#2563eb" }}></span>}
               </button>
             ))}
           </div>
@@ -235,12 +235,7 @@ export default function App() {
       </nav>
 
       <main className="main" onClick={() => menuOpen && setMenuOpen(false)}>
-        <div className="method-banner">
-          <div className="method-dot" />
-          <span>Buffett (30%) · RJ Style (30%) · Quality/MF (25%) · Graham Value (15%) · {ALL_PROFILES_FLAT.length} investor profiles · Sector comparisons</span>
-        </div>
-
-        {tab === "watchlist" && (
+{tab === "watchlist" && (
           <>
             <div style={{ background:"white", border:"1.5px solid #e2e8f0", borderRadius:14, padding:"18px 20px", marginBottom:16, boxShadow:"0 1px 3px rgba(0,0,0,0.06)" }}>
               <div style={{ fontSize:12, fontWeight:700, color:"#2563eb", textTransform:"uppercase", letterSpacing:0.8, marginBottom:12, fontFamily:"JetBrains Mono, monospace" }}>
@@ -297,7 +292,13 @@ export default function App() {
                   {profiles.map(p => (
                     <div key={p.id} className="profile-card" style={{ "--profile-color": p.color }}
                       onClick={() => { setSelectedProfile(p); runProfileScreen(p.id); }}>
-                      <div className="profile-avatar">{p.avatar}</div>
+                      <div className="profile-avatar-badge" style={{
+                        background: p.color, color: "white",
+                        width: 40, height: 40, borderRadius: 10,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: 11, fontWeight: 800, flexShrink: 0,
+                        fontFamily: "JetBrains Mono, monospace",
+                      }}>{p.avatar}</div>
                       <div className="profile-info">
                         <div className="profile-name">{p.name}</div>
                         <div className="profile-focus">{p.focus}</div>
@@ -411,10 +412,10 @@ export default function App() {
         )}
 
         {!loading && stocks.length === 0 && !error && tab === "screener" && (
-          <div className="empty-state"><div className="empty-icon">📊</div><div className="empty-title">Set filters and click Screen All Stocks</div></div>
+          <div className="empty-state"><div className="empty-icon"></div><div className="empty-title">Set filters and click Screen All Stocks</div></div>
         )}
         {tab === "portfolio" && !portfolio && !portfolioLoading && !error && (
-          <div className="empty-state"><div className="empty-icon">📋</div><div className="empty-title">Select a profile and enter your capital</div><div className="empty-sub">Builds a portfolio using that investor's exact philosophy</div></div>
+          <div className="empty-state"><div className="empty-icon"></div><div className="empty-title">Select a profile and enter your capital</div><div className="empty-sub">Builds a portfolio using that investor's exact philosophy</div></div>
         )}
       </main>
 

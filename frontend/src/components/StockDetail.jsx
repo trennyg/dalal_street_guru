@@ -235,7 +235,7 @@ export default function StockDetail({ stock, onClose }) {
                   {stock.scoring.top_reasons?.length > 0 ? (
                     stock.scoring.top_reasons.map((r, i) => (
                       <div key={i} style={{ display: "flex", gap: 8, marginBottom: 6 }}>
-                        <span style={{ color: "#16a34a", flexShrink: 0, marginTop: 1 }}>✓</span>
+                        <span style={{ color: "#16a34a", flexShrink: 0, marginTop: 1 }}></span>
                         <span style={{ fontSize: 12, color: "#374151", lineHeight: 1.5 }}>{r}</span>
                       </div>
                     ))
@@ -259,7 +259,13 @@ export default function StockDetail({ stock, onClose }) {
                       borderRadius: 10, padding: "12px 14px",
                     }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                        <span style={{ fontSize: 20 }}>{p.avatar}</span>
+                        <div style={{
+                          width: 32, height: 32, borderRadius: 7,
+                          background: "#2563eb",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          fontSize: 9, fontWeight: 800, color: "white",
+                          fontFamily: "JetBrains Mono, monospace", flexShrink: 0,
+                        }}>{p.id?.slice(0,3).toUpperCase()}</div>
                         <div>
                           <div style={{ fontSize: 11, fontWeight: 700, color: "#1e40af" }}>{p.name}</div>
                           <div style={{ fontSize: 10, color: "#2563eb", fontFamily: "JetBrains Mono, monospace" }}>
@@ -269,7 +275,7 @@ export default function StockDetail({ stock, onClose }) {
                       </div>
                       {p.reasons?.slice(0, 2).map((r, i) => (
                         <div key={i} style={{ fontSize: 10, color: "#475569", display: "flex", gap: 4, marginTop: 3 }}>
-                          <span style={{ color: "#16a34a" }}>✓</span><span>{r}</span>
+                          <span style={{ color: "#16a34a" }}></span><span>{r}</span>
                         </div>
                       ))}
                     </div>
