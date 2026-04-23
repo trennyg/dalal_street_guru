@@ -88,10 +88,11 @@ export default function StockDetail({ stock, onClose }) {
         maxHeight: "90vh",
         overflow: "auto",
         boxShadow: "0 25px 50px rgba(0,0,0,0.15)",
+        margin: "0 auto",
       }}>
         {/* Header */}
         <div style={{
-          padding: "24px 28px 20px",
+          padding: "20px max(16px, min(28px, 4vw)) 16px",
           borderBottom: "1px solid #e2e8f0",
           position: "sticky", top: 0,
           background: "white", zIndex: 10,
@@ -157,9 +158,9 @@ export default function StockDetail({ stock, onClose }) {
         )}
 
         {!loading && (
-          <div style={{ padding: "24px 28px" }}>
+          <div style={{ padding: "16px max(16px, min(28px, 4vw))" }}>
             {/* Price strip */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 24 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 12, marginBottom: 24 }}>
               {[
                 { label: "Current Price", value: d.current_price ? `₹${formatNum(d.current_price, 0)}` : "N/A" },
                 { label: "52W High", value: d["52w_high"] ? `₹${formatNum(d["52w_high"], 0)}` : "N/A" },
@@ -181,7 +182,7 @@ export default function StockDetail({ stock, onClose }) {
             </div>
 
             {/* Two column layout */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 24 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 20, marginBottom: 24 }}>
               {/* Fundamentals with sector comparison */}
               <div style={{ background: "#f8faff", border: "1px solid #e2e8f0", borderRadius: 12, padding: 18 }}>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", marginBottom: 8 }}>
@@ -251,7 +252,7 @@ export default function StockDetail({ stock, onClose }) {
                 <div style={{ fontSize: 11, color: "#2563eb", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 12 }}>
                   Best Matching Investor Profiles
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
                   {stock.matching_profiles.map(p => (
                     <div key={p.id} style={{
                       background: "#f8faff", border: "1.5px solid #bfdbfe",
@@ -279,7 +280,7 @@ export default function StockDetail({ stock, onClose }) {
 
             {/* Pros and Cons */}
             {(d.pros?.length > 0 || d.cons?.length > 0) && (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 24 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12, marginBottom: 24 }}>
                 {d.pros?.length > 0 && (
                   <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, padding: 16 }}>
                     <div style={{ fontSize: 11, color: "#16a34a", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 8 }}>

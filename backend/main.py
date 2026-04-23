@@ -208,7 +208,16 @@ def fetch_screener(symbol: str) -> dict:
             sector = "Unknown"
             for a in soup.select("a[href*='/screen/']"):
                 t = a.get_text(strip=True)
-                if t and 2 < len(t) < 40: sector = t; break
+                if t and 2 < len(t) < 40 and t not in ("Screener","Login","Sign Up","Home","Screen","Advanced"): sector = t; break
+            if sector == "Unknown":
+                for sel in [".company-info a", ".breadcrumb a", ".sector a", "span.sector"]:
+                    el = soup.select_one(sel)
+                    if el:
+                        t = el.get_text(strip=True)
+                        if t and 2 < len(t) < 40: sector = t; break
+            if sector == "Unknown":
+                m = re.search(r"Sector[:\s]+([A-Za-z &/]+)\n", soup.get_text())
+                if m: sector = m.group(1).strip()
 
             # Quarterly data — last 4 quarters revenue
             quarterly_revenue = []
@@ -773,7 +782,8 @@ def generate_stock_rationale(stock: dict, profile_id: str) -> str:
 
 def generate_portfolio_rationale(profile_id: str, positions: list, sector_exposure: dict) -> str:
     profile = INVESTOR_PROFILES.get(profile_id, {})
-    top_sector = max(sector_exposure.items(), key=lambda x: x[1])[0] if sector_exposure else "Diversified"
+    known = {k:v for k,v in sector_exposure.items() if k != "Unknown"}
+    top_sector = max(known.items(), key=lambda x: x[1])[0] if known else (max(sector_exposure.items(), key=lambda x: x[1])[0] if sector_exposure else "Diversified")
     top_stocks = ", ".join([p["symbol"] for p in positions[:3]])
     return (
         f"This portfolio is constructed using {profile.get('name', profile_id)}'s '{profile.get('focus', '')}' philosophy. "
