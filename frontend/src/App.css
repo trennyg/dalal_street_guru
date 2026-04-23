@@ -928,3 +928,68 @@ html, body, #root {
   .portfolio-header { padding: 18px 16px 16px; }
   .portfolio-title { font-size: 17px; }
 }
+
+/* ─── Hamburger & Mobile Menu ─────────────── */
+.hamburger-btn {
+  display: none;
+  background: var(--surface2);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  padding: 7px;
+  cursor: pointer;
+  color: var(--text);
+  align-items: center;
+  justify-content: center;
+  transition: all 0.12s;
+}
+.hamburger-btn:hover { border-color: var(--blue); color: var(--blue); background: var(--blue-light); }
+
+.mobile-tab-label {
+  display: none;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.desktop-only { display: flex; }
+
+.mobile-menu {
+  display: none;
+  flex-direction: column;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 8px 16px rgba(0,0,0,0.08);
+  position: absolute;
+  left: 0; right: 0;
+  z-index: 99;
+}
+
+.mobile-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text2);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: background 0.1s;
+}
+.mobile-menu-item:hover { background: var(--surface2); color: var(--blue); }
+.mobile-menu-item.active { color: var(--blue); background: var(--blue-light); }
+.mobile-menu-item:last-child { border-bottom: none; }
+
+@media (max-width: 768px) {
+  .desktop-only { display: none !important; }
+  .hamburger-btn { display: flex; }
+  .mobile-tab-label { display: block; }
+  .mobile-menu { display: flex; }
+  .nav { position: relative; }
+  .nav-inner { height: 56px; }
+}
