@@ -744,7 +744,7 @@ export default function App() {
 
 // ─── Home Tab ─────────────────────────────────────────────────────────────────
 function HomeTab({ pulse, onViewStock, onSwitchTab, quizStep, setQuizStep, quizAnswers, handleQuizAnswer, quizResult, setQuizResult, setQuizAnswers, setPortfolioProfile }) {
-  const [loadingSymbol, setLoadingSymbol] = React.useState(null);
+  const [loadingSymbol, setLoadingSymbol] = useState(null);
   const handlePulseClick = async (symbol) => {
     setLoadingSymbol(symbol);
     try {
