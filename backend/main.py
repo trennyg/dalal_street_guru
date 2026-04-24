@@ -20,30 +20,46 @@ _nifty_pe_cache = {"pe": None, "fetched_at": None}
 def fetch_nifty_pe() -> float:
     """Fetch current Nifty 50 P/E ratio."""
     global _nifty_pe_cache
-    # Return cached if fresh (< 4 hours)
     if _nifty_pe_cache["pe"] and _nifty_pe_cache["fetched_at"]:
         age_h = (datetime.now() - _nifty_pe_cache["fetched_at"]).total_seconds() / 3600
         if age_h < 4:
             return _nifty_pe_cache["pe"]
+    # Try multiple sources
+    # Source 1: yfinance ^NSEI
     try:
         ticker = yf.Ticker("^NSEI")
-        pe = ticker.info.get("trailingPE")
-        if pe and 8 < pe < 60:
-            _nifty_pe_cache = {"pe": round(pe, 1), "fetched_at": datetime.now()}
-            return round(pe, 1)
+        info = ticker.info
+        pe = info.get("trailingPE") or info.get("forwardPE")
+        if pe and isinstance(pe, (int, float)) and 8 < pe < 60:
+            _nifty_pe_cache = {"pe": round(float(pe), 1), "fetched_at": datetime.now()}
+            return round(float(pe), 1)
     except: pass
-    # Fallback: scrape NSE
+    # Source 2: Screener.in NIFTY page
     try:
-        r = requests.get("https://www.screener.in/company/NIFTY/", timeout=8,
-                        headers={"User-Agent": "Mozilla/5.0"})
-        m = re.search(r'P/E[^\d]*(\d+\.?\d*)', r.text)
+        r = requests.get("https://www.screener.in/company/NIFTY/",
+                        timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        m = re.search(r"P/E[^\d]*?(\d{1,2}\.?\d*)", r.text)
         if m:
             pe = float(m.group(1))
             if 8 < pe < 60:
                 _nifty_pe_cache = {"pe": pe, "fetched_at": datetime.now()}
                 return pe
     except: pass
-    return 22.0  # historical average fallback
+    # Source 3: NSE India API
+    try:
+        r = requests.get(
+            "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050",
+            timeout=8, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json",
+                                "Referer": "https://www.nseindia.com/"}
+        )
+        if r.status_code == 200:
+            data = r.json()
+            pe = data.get("data", [{}])[0].get("pe")
+            if pe and 8 < float(pe) < 60:
+                _nifty_pe_cache = {"pe": round(float(pe), 1), "fetched_at": datetime.now()}
+                return round(float(pe), 1)
+    except: pass
+    return 22.0  # historical average fallback — market is currently near fair value
 
 
 def get_market_valuation(pe: float) -> dict:
@@ -1930,8 +1946,10 @@ def market_pulse():
         stocks = list(_cache.values())
     if not stocks:
         return {"nifty_pe": nifty_pe, "market": market, "strong_buys": [], "near_lows": [], "top_sectors": [], "total_indexed": 0}
-    strong_buys = sorted([s for s in stocks if s["conviction"] == "Strong Buy"],
-                         key=lambda x: x["scoring"]["composite"], reverse=True)[:6]
+    strong_buys = sorted(
+        [s for s in stocks if s["conviction"] in ("Strong Buy", "Buy")],
+        key=lambda x: x["scoring"]["composite"], reverse=True
+    )[:6]
     near_lows = []
     for s in stocks:
         price = s.get("current_price"); low = s.get("52w_low"); high = s.get("52w_high")

@@ -818,10 +818,12 @@ function HomeTab({ pulse, onSwitchTab, quizStep, setQuizStep, quizAnswers, handl
           <div className="pulse-card">
             <div className="pulse-section-title">Nifty 50 Valuation</div>
             <div className="nifty-pe-gauge">
-              <div className="pe-value" style={{color:pulse.market?.color||"var(--blue)"}}>{pulse.nifty_pe}x</div>
+              <div className="pe-value" style={{color:pulse.market?.color||"var(--blue)"}}>
+                {pulse.nifty_pe && !isNaN(pulse.nifty_pe) ? `${pulse.nifty_pe}x` : "—"}
+              </div>
               <div className="pe-zone" style={{background:pulse.market?.color+"22",color:pulse.market?.color}}>{pulse.market?.zone}</div>
               <div className="pe-bar-track">
-                <div className="pe-indicator" style={{left:`${Math.min(Math.max((pulse.nifty_pe-12)/20*100,2),98)}%`}}/>
+                <div className="pe-indicator" style={{left:`${pulse.nifty_pe && !isNaN(pulse.nifty_pe) ? Math.min(Math.max((pulse.nifty_pe-12)/20*100,2),98) : 50}%`}}/>
               </div>
               <div className="pe-scale"><span>12x</span><span>18x</span><span>22x</span><span>26x</span><span>32x</span></div>
               <div style={{fontSize:12,color:"var(--text2)",lineHeight:1.6,marginTop:12,textAlign:"left"}}>{pulse.market?.description}</div>
@@ -833,21 +835,21 @@ function HomeTab({ pulse, onSwitchTab, quizStep, setQuizStep, quizAnswers, handl
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
               <div>
                 <div className="pulse-section-title">Strong Buy Zone</div>
-                {pulse.strong_buys?.map(s=>(
+                {pulse.strong_buys?.length > 0 ? pulse.strong_buys.map(s=>(
                   <div key={s.symbol} className="pulse-stock-row">
                     <div><div className="pulse-symbol">{s.symbol}</div><div className="pulse-name">{s.company_name?.split(" ").slice(0,3).join(" ")}</div></div>
                     <div className="pulse-score" style={{color:SCORE_COLOR(s.score)}}>{s.score}</div>
                   </div>
-                ))}
+                )) : <div style={{fontSize:12,color:"var(--text3)",padding:"8px 0"}}>Cache building — check back in a few minutes</div>}
               </div>
               <div>
                 <div className="pulse-section-title">Near 52W Lows</div>
-                {pulse.near_lows?.map(s=>(
+                {pulse.near_lows?.length > 0 ? pulse.near_lows.map(s=>(
                   <div key={s.symbol} className="pulse-stock-row">
                     <div><div className="pulse-symbol">{s.symbol}</div><div className="pulse-name" style={{color:"var(--amber)"}}>↓ {s.pct_from_low?.toFixed(0)}% from low</div></div>
                     <div className="pulse-score" style={{color:SCORE_COLOR(s.score)}}>{s.score}</div>
                   </div>
-                ))}
+                )) : <div style={{fontSize:12,color:"var(--text3)",padding:"8px 0"}}>Cache building — check back shortly</div>}
               </div>
             </div>
           </div>
