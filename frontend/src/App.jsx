@@ -63,12 +63,10 @@ function StockSearch({ onAdd, existingSymbols = [], placeholder = "Search symbol
     setQuery(val);
     if (!val.trim()) { setSuggestions([]); return; }
     const q = val.toUpperCase().trim();
-    setSuggestions(
-      allSymbols.filter(s =>
-        (s.symbol.startsWith(q) || s.symbol.includes(q) || s.name?.toUpperCase().includes(q))
-        && !existingSymbols.includes(s.symbol)
-      ).slice(0, 8)
-    );
+    const exact = allSymbols.filter(s => s.symbol.startsWith(q) && !existingSymbols.includes(s.symbol));
+    const nameMatch = allSymbols.filter(s => !s.symbol.startsWith(q) && s.name?.toUpperCase().includes(q) && !existingSymbols.includes(s.symbol));
+    const contains = allSymbols.filter(s => !s.symbol.startsWith(q) && s.symbol.includes(q) && !s.name?.toUpperCase().includes(q) && !existingSymbols.includes(s.symbol));
+    setSuggestions([...exact, ...nameMatch, ...contains].slice(0, 8));
   };
 
   const handleSelect = sym => {
