@@ -365,17 +365,47 @@ def fetch_screener_fallback(symbol: str) -> dict:
 
 
 def fetch_stock_data(symbol: str) -> dict:
-    """Try yfinance first, fallback to Screener.in."""
-    data = fetch_yfinance(symbol)
-    if data and data.get("current_price"):
-        data["data_source"] = "yfinance"
-        return data
-    # Fallback
-    data = fetch_screener_fallback(symbol)
-    if data:
-        data["data_source"] = "screener"
-        return data
-    return {}
+    """Merge yfinance + screener data for completeness."""
+    yf_data = fetch_yfinance(symbol)
+    sc_data = fetch_screener_fallback(symbol)
+    
+    if not yf_data and not sc_data:
+        return {}
+    
+    if not yf_data:
+        sc_data["data_source"] = "screener"
+        return sc_data
+    
+    if not sc_data:
+        yf_data["data_source"] = "yfinance"
+        return yf_data
+    
+    # Merge: yfinance is primary, screener fills gaps
+    merged = dict(yf_data)
+    merged["data_source"] = "merged"
+    
+    # Fill missing fields from screener
+    fill_from_screener = [
+        "roce", "operating_margins", "promoter_holding", 
+        "pros", "cons", "quarterly_revenue", "quarterly_profit",
+        "sector", "industry"
+    ]
+    for field in fill_from_screener:
+        yf_val = yf_data.get(field)
+        sc_val = sc_data.get(field)
+        # Use screener value if yfinance is None/empty
+        if (yf_val is None or yf_val == [] or yf_val == "") and sc_val:
+            merged[field] = sc_val
+    
+    # Also override sector if yfinance gave generic sector
+    if sc_data.get("sector") and sc_data["sector"] != "Unknown":
+        merged["sector"] = sc_data["sector"]
+    
+    # Use screener OPM if yfinance OPM is missing
+    if not merged.get("operating_margins") and sc_data.get("operating_margins"):
+        merged["operating_margins"] = sc_data["operating_margins"]
+    
+    return merged
 
 
 # ─── Sector averages ──────────────────────────────────────────────────────────
@@ -1367,8 +1397,14 @@ async def startup():
     loaded = load_cache()
     if loaded:
         age_h = (datetime.now() - _cache_time).total_seconds() / 3600
-        if age_h > 12:
+        # Force rebuild if cache is older than 6h OR if data_source is not merged
+        sample = list(_cache.values())[:5] if _cache else []
+        needs_rebuild = age_h > 6 or any(s.get("data_source") not in ("merged","yfinance") for s in sample)
+        if needs_rebuild:
+            print(f"Cache needs rebuild (age={age_h:.1f}h, sources={set(s.get('data_source') for s in sample)})")
             threading.Thread(target=refresh_cache, daemon=True).start()
+        else:
+            print(f"Cache fresh ({age_h:.1f}h old, merged data)")
     else:
         threading.Thread(target=refresh_cache, daemon=True).start()
 
@@ -1423,6 +1459,23 @@ def get_education_item(content_id: str):
 @app.get("/api/sector-averages")
 def sector_averages():
     return {"sectors": _sector_averages, "count": len(_sector_averages)}
+
+@app.get("/api/symbols")
+def get_symbols():
+    """Fast endpoint returning all cached symbols for autocomplete."""
+    with _cache_lock:
+        symbols = [
+            {
+                "symbol": v["symbol"],
+                "name": v["company_name"],
+                "sector": v.get("sector", "Unknown"),
+            }
+            for v in _cache.values()
+            if v.get("symbol")
+        ]
+    # Also include the full universe even if not cached yet
+    universe_symbols = [{"symbol": s, "name": s, "sector": ""} for s in NIFTY_500 if s not in {x["symbol"] for x in symbols}]
+    return {"symbols": symbols + universe_symbols, "count": len(symbols) + len(universe_symbols)}
 
 @app.get("/api/stock/{symbol}")
 def get_stock(symbol: str):

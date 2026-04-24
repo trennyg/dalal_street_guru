@@ -53,10 +53,16 @@ function StockSearch({ onAdd, existingSymbols = [], placeholder = "Search symbol
   const BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
   useEffect(() => {
-    fetch(`${BASE_URL}/api/screen?min_score=0&limit=500`)
+    fetch(`${BASE_URL}/api/symbols`)
       .then(r => r.json())
-      .then(d => { if (d.stocks) setAllSymbols(d.stocks.map(s => ({ symbol: s.symbol, name: s.company_name, sector: s.sector }))); })
-      .catch(() => {});
+      .then(d => { if (d.symbols) setAllSymbols(d.symbols); })
+      .catch(() => {
+        // fallback to screener endpoint
+        fetch(`${BASE_URL}/api/screen?min_score=0&limit=500`)
+          .then(r => r.json())
+          .then(d => { if (d.stocks) setAllSymbols(d.stocks.map(s => ({ symbol: s.symbol, name: s.company_name, sector: s.sector }))); })
+          .catch(() => {});
+      });
   }, [BASE_URL]);
 
   const handleInput = val => {
