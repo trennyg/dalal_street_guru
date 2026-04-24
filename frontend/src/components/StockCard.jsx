@@ -1,4 +1,4 @@
-import { SCORE_COLOR, SCORE_BG, formatNum, formatPct, formatMarketCap } from "../lib/api";
+import { SCORE_COLOR, SCORE_BG, fmtNum, fmtPct, fmtMarketCap } from "../lib/api";
 
 const CONVICTION_CLASS = {
   "Strong Buy": "conviction-strong-buy",
@@ -8,35 +8,26 @@ const CONVICTION_CLASS = {
   "Avoid": "conviction-avoid",
 };
 
-const PROFILE_AVATARS = {
-  buffett:"WB", rj:"RJ", ramesh_damani:"RD", vijay_kedia:"VK",
-  parag_parikh:"PP", marcellus:"MC", motilal_qglp:"MO",
-  porinju:"PV", ashish_kacholia:"AK", dolly_khanna:"DK",
-  chandrakant_sampat:"CS", radhakishan_damani:"RKD", raamdeo_agrawal:"RA",
-  sanjay_bakshi:"SB", kenneth_andrade:"KA", manish_kejriwal:"MK",
-  peter_lynch:"PL", ben_graham:"BG", charlie_munger:"CM", phil_fisher:"PF",
-  nippon_smallcap:"NS", mirae_asset:"MA", hdfc_mf:"HM",
-  anand_rathi:"AR", white_oak:"WO", enam:"EN", nemish_shah:"NSH",
-  ask_investment:"ASK", carnelian:"CA", murugappa:"MG",
-};
+const SCORE_DIMS = [
+  { key: "quality", label: "Quality" },
+  { key: "growth", label: "Growth" },
+  { key: "safety", label: "Safety" },
+  { key: "value", label: "Value" },
+];
 
-function SectorTag({ value, sectorAvg, label, lowerBetter = false }) {
-  if (value === null || value === undefined || !sectorAvg) return null;
-  const isGood = lowerBetter ? value < sectorAvg : value > sectorAvg * 1.05;
-  const isBad = lowerBetter ? value > sectorAvg * 1.1 : value < sectorAvg * 0.9;
-  const color = isGood ? "#16a34a" : isBad ? "#dc2626" : "#d97706";
-  const arrow = isGood ? "↑" : isBad ? "↓" : "→";
-  return (
-    <span style={{ fontSize: 10, color, fontFamily: "JetBrains Mono, monospace", marginLeft: 4 }}>
-      {arrow}
-    </span>
-  );
+function SectorBadge({ comparison, field }) {
+  if (!comparison || !comparison[field]) return null;
+  const { status } = comparison[field];
+  if (status === "better") return <span className="sector-arrow-up" title="Better than sector avg">↑</span>;
+  if (status === "worse") return <span className="sector-arrow-down" title="Worse than sector avg">↓</span>;
+  return <span className="sector-arrow-neutral" title="In line with sector avg">→</span>;
 }
 
 export default function StockCard({ stock, onClick, activeProfile }) {
   const {
     symbol, company_name, sector, current_price, pe_ratio, pb_ratio,
-    roe, scoring, conviction, matching_profiles, sector_comparison,
+    roe, operating_margins, scoring, conviction, matching_profiles,
+    sector_comparison, price_change_pct, market_cap,
   } = stock;
 
   const displayScore = activeProfile && stock.profile_score !== undefined
@@ -44,47 +35,23 @@ export default function StockCard({ stock, onClick, activeProfile }) {
     : scoring.composite;
 
   const sc = sector_comparison || {};
+  const priceUp = price_change_pct !== null && price_change_pct !== undefined && price_change_pct > 0;
+  const priceDown = price_change_pct !== null && price_change_pct !== undefined && price_change_pct < 0;
 
   return (
     <div
+      className="stock-card"
       onClick={() => onClick(stock)}
-      style={{
-        background: "white",
-        border: "1.5px solid #e2e8f0",
-        borderRadius: 14,
-        padding: "18px 20px",
-        cursor: "pointer",
-        transition: "all 0.15s",
-        boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
-        position: "relative",
-        overflow: "hidden",
-      }}
-      onMouseEnter={e => {
-        e.currentTarget.style.borderColor = "#2563eb";
-        e.currentTarget.style.transform = "translateY(-2px)";
-        e.currentTarget.style.boxShadow = "0 8px 16px rgba(37,99,235,0.12)";
-      }}
-      onMouseLeave={e => {
-        e.currentTarget.style.borderColor = "#e2e8f0";
-        e.currentTarget.style.transform = "translateY(0)";
-        e.currentTarget.style.boxShadow = "0 1px 3px rgba(0,0,0,0.06)";
-      }}
+      style={{ "--score-color": SCORE_COLOR(displayScore) }}
     >
-      {/* Top accent bar */}
-      <div style={{
-        position: "absolute", top: 0, left: 0, right: 0, height: 3,
-        background: `linear-gradient(90deg, ${SCORE_COLOR(displayScore)}, transparent)`,
-        opacity: 0.8,
-      }} />
-
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 4, flexWrap: "wrap" }}>
             <span style={{
-              fontFamily: "JetBrains Mono, monospace",
-              fontSize: 15, fontWeight: 700,
-              color: "#1e40af", letterSpacing: 0.5,
+              fontFamily: "var(--font-mono)",
+              fontSize: 15, fontWeight: 600,
+              color: "var(--blue)", letterSpacing: 0.3,
             }}>
               {symbol}
             </span>
@@ -92,115 +59,125 @@ export default function StockCard({ stock, onClick, activeProfile }) {
               {conviction}
             </span>
           </div>
-          <div style={{ fontSize: 12, color: "#64748b", fontWeight: 500 }}>
-            {company_name?.split(" ").slice(0, 5).join(" ")}
+          <div style={{ fontSize: 12.5, color: "var(--text2)", fontWeight: 500, marginBottom: 2 }}>
+            {company_name?.split(" ").slice(0, 4).join(" ")}
           </div>
           <div style={{
-            fontSize: 10, color: "#94a3b8",
+            fontSize: 10, color: "var(--text3)",
             textTransform: "uppercase", letterSpacing: 0.8,
-            marginTop: 2, fontFamily: "JetBrains Mono, monospace",
+            fontFamily: "var(--font-mono)",
           }}>
-            {sector}
+            {sector !== "Unknown" ? sector : "—"}
           </div>
         </div>
 
         {/* Score circle */}
-        <div style={{
-          width: 52, height: 52,
-          borderRadius: "50%",
+        <div className="score-circle" style={{
           background: SCORE_BG(displayScore),
           border: `2px solid ${SCORE_COLOR(displayScore)}`,
-          display: "flex", flexDirection: "column",
-          alignItems: "center", justifyContent: "center",
-          flexShrink: 0,
         }}>
-          <div style={{
-            fontSize: 18, fontWeight: 800,
-            color: SCORE_COLOR(displayScore),
-            fontFamily: "JetBrains Mono, monospace",
-            lineHeight: 1,
-          }}>
+          <div className="score-value" style={{ color: SCORE_COLOR(displayScore) }}>
             {displayScore}
           </div>
-          <div style={{ fontSize: 8, color: SCORE_COLOR(displayScore), opacity: 0.7 }}>
+          <div className="score-label" style={{ color: SCORE_COLOR(displayScore) }}>
             {activeProfile ? "fit" : "score"}
           </div>
         </div>
       </div>
 
-      {/* Profile reasons in profile mode */}
+      {/* Profile match reasons */}
       {activeProfile && stock.profile_reasons?.length > 0 && (
-        <div style={{ marginBottom: 12 }}>
-          {stock.profile_reasons.map((r, i) => (
-            <div key={i} style={{ fontSize: 11, color: "#16a34a", display: "flex", gap: 5, marginBottom: 3 }}>
-              <span></span><span>{r}</span>
+        <div style={{ marginBottom: 10 }}>
+          {stock.profile_reasons.slice(0, 2).map((r, i) => (
+            <div key={i} style={{ display: "flex", gap: 5, marginBottom: 3, alignItems: "flex-start" }}>
+              <span style={{ color: "var(--green)", fontSize: 10, flexShrink: 0, marginTop: 1 }}>✓</span>
+              <span style={{ fontSize: 11.5, color: "var(--text2)", lineHeight: 1.4 }}>{r}</span>
             </div>
           ))}
         </div>
       )}
 
-      {/* Matching profiles */}
+      {/* Matching profile badges */}
       {!activeProfile && matching_profiles?.length > 0 && (
-        <div style={{ display: "flex", gap: 4, marginBottom: 12, alignItems: "center" }}>
-          <span style={{ fontSize: 10, color: "#94a3b8", marginRight: 2 }}>Matches:</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 11 }}>
+          <span style={{ fontSize: 10, color: "var(--text3)", fontFamily: "var(--font-mono)" }}>Matches:</span>
           {matching_profiles.slice(0, 3).map(p => (
-            <span key={p.id} title={`${p.name} (${p.score}/100)`}
-              style={{ fontSize: 16, cursor: "help" }}>
-              {PROFILE_AVATARS[p.id] || "•"}
+            <span key={p.id}
+              title={`${p.name} — ${p.score}/100`}
+              style={{
+                fontSize: 9.5, fontWeight: 700,
+                background: "var(--blue-light)",
+                color: p.color || "var(--blue)",
+                border: `1px solid ${p.color || "var(--blue-mid)"}`,
+                borderRadius: 5, padding: "2px 6px",
+                fontFamily: "var(--font-mono)",
+                cursor: "help",
+              }}>
+              {p.avatar}
             </span>
           ))}
         </div>
       )}
 
-      {/* Score bars */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 14px", marginBottom: 14 }}>
-        {Object.entries(scoring.scores).map(([key, val]) => (
-          <div key={key}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-              <span style={{ fontSize: 9, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600 }}>
-                {key.replace("_", " ")}
-              </span>
-              <span style={{ fontSize: 9, color: SCORE_COLOR(val), fontFamily: "JetBrains Mono, monospace", fontWeight: 700 }}>
-                {val}
-              </span>
+      {/* Score dimension bars */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 14px", marginBottom: 13 }}>
+        {SCORE_DIMS.map(({ key, label }) => {
+          const val = scoring.scores?.[key] ?? 0;
+          return (
+            <div key={key}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                <span style={{ fontSize: 9.5, color: "var(--text3)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>
+                  {label}
+                </span>
+                <span style={{ fontSize: 9.5, fontFamily: "var(--font-mono)", fontWeight: 600, color: SCORE_COLOR(val) }}>
+                  {val}
+                </span>
+              </div>
+              <div className="score-bar-track">
+                <div className="score-bar-fill" style={{
+                  width: `${val}%`,
+                  background: SCORE_COLOR(val),
+                  animationDelay: "0.1s",
+                }} />
+              </div>
             </div>
-            <div style={{ height: 4, background: "#f1f5f9", borderRadius: 2 }}>
-              <div style={{
-                height: "100%", width: `${val}%`,
-                background: SCORE_COLOR(val), borderRadius: 2,
-                transition: "width 0.5s ease",
-              }} />
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
-      {/* Key metrics with sector comparison */}
+      {/* Key metrics row */}
       <div style={{
-        display: "grid", gridTemplateColumns: "repeat(4,1fr)",
-        gap: 8, borderTop: "1px solid #f1f5f9", paddingTop: 12,
+        display: "grid", gridTemplateColumns: "repeat(4, 1fr)",
+        gap: 6, borderTop: "1px solid var(--border)", paddingTop: 11,
       }}>
         {[
-          { label: "P/E", value: pe_ratio ? formatNum(pe_ratio) : "—", scKey: "pe_ratio", lb: true },
-          { label: "P/B", value: pb_ratio ? formatNum(pb_ratio) : "—", scKey: "pb_ratio", lb: true },
-          { label: "ROE", value: roe ? formatPct(roe) : "—", scKey: "roe", lb: false },
-          { label: "Price", value: current_price ? `₹${formatNum(current_price, 0)}` : "—", scKey: null },
+          { label: "P/E", value: pe_ratio ? fmtNum(pe_ratio) : "—", field: "pe_ratio" },
+          { label: "ROE", value: roe ? fmtPct(roe) : "—", field: "roe" },
+          { label: "OPM", value: operating_margins ? fmtPct(operating_margins) : "—", field: "operating_margins" },
+          {
+            label: "Price",
+            value: current_price ? `₹${Math.round(current_price).toLocaleString("en-IN")}` : "—",
+            field: null,
+            extra: price_change_pct !== null && price_change_pct !== undefined ? (
+              <span style={{
+                fontSize: 9, fontFamily: "var(--font-mono)", fontWeight: 600,
+                color: priceUp ? "var(--green)" : priceDown ? "var(--red)" : "var(--text3)",
+              }}>
+                {priceUp ? "+" : ""}{price_change_pct?.toFixed(1)}%
+              </span>
+            ) : null,
+          },
         ].map(m => (
           <div key={m.label} style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 9, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 2 }}>
+            <div style={{ fontSize: 9, color: "var(--text3)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 2 }}>
               {m.label}
             </div>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <span style={{ fontSize: 12, color: "#0f172a", fontFamily: "JetBrains Mono, monospace", fontWeight: 600 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 2 }}>
+              <span style={{ fontSize: 12, color: "var(--text)", fontFamily: "var(--font-mono)", fontWeight: 600 }}>
                 {m.value}
               </span>
-              {m.scKey && sc[m.scKey] && (
-                <SectorTag
-                  value={sc[m.scKey].value}
-                  sectorAvg={sc[m.scKey].sector_avg}
-                  lowerBetter={m.lb}
-                />
-              )}
+              {m.field && <SectorBadge comparison={sc} field={m.field} />}
+              {m.extra}
             </div>
           </div>
         ))}
