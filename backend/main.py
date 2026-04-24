@@ -14,6 +14,173 @@ import yfinance as yf
 app = FastAPI(title="stocks.ai API", version="12.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
+# ─── Nifty PE ─────────────────────────────────────────────────────────────────
+_nifty_pe_cache = {"pe": None, "fetched_at": None}
+
+def fetch_nifty_pe() -> float:
+    """Fetch current Nifty 50 P/E ratio."""
+    global _nifty_pe_cache
+    # Return cached if fresh (< 4 hours)
+    if _nifty_pe_cache["pe"] and _nifty_pe_cache["fetched_at"]:
+        age_h = (datetime.now() - _nifty_pe_cache["fetched_at"]).total_seconds() / 3600
+        if age_h < 4:
+            return _nifty_pe_cache["pe"]
+    try:
+        ticker = yf.Ticker("^NSEI")
+        pe = ticker.info.get("trailingPE")
+        if pe and 8 < pe < 60:
+            _nifty_pe_cache = {"pe": round(pe, 1), "fetched_at": datetime.now()}
+            return round(pe, 1)
+    except: pass
+    # Fallback: scrape NSE
+    try:
+        r = requests.get("https://www.screener.in/company/NIFTY/", timeout=8,
+                        headers={"User-Agent": "Mozilla/5.0"})
+        m = re.search(r'P/E[^\d]*(\d+\.?\d*)', r.text)
+        if m:
+            pe = float(m.group(1))
+            if 8 < pe < 60:
+                _nifty_pe_cache = {"pe": pe, "fetched_at": datetime.now()}
+                return pe
+    except: pass
+    return 22.0  # historical average fallback
+
+
+def get_market_valuation(pe: float) -> dict:
+    """Return market valuation context based on Nifty PE."""
+    if pe < 15:
+        return {"zone": "Deep Value", "color": "#16a34a", "description": "Market is historically cheap. Aggressive equity allocation justified.", "equity_modifier": 1.15}
+    elif pe < 18:
+        return {"zone": "Undervalued", "color": "#65a30d", "description": "Market is trading below historical average. Good time to be invested.", "equity_modifier": 1.08}
+    elif pe < 22:
+        return {"zone": "Fair Value", "color": "#2563eb", "description": "Market at historical average. Maintain base allocation.", "equity_modifier": 1.0}
+    elif pe < 26:
+        return {"zone": "Slightly Expensive", "color": "#d97706", "description": "Market above historical average. Slightly reduce equity, build cash.", "equity_modifier": 0.90}
+    elif pe < 30:
+        return {"zone": "Expensive", "color": "#ea580c", "description": "Market significantly overvalued. Reduce equity, increase safety assets.", "equity_modifier": 0.80}
+    else:
+        return {"zone": "Bubble Territory", "color": "#dc2626", "description": "Extreme overvaluation. Only highest-conviction equity positions justified.", "equity_modifier": 0.65}
+
+
+# ─── Asset allocation per profile ─────────────────────────────────────────────
+PROFILE_ALLOCATION = {
+    "rj": {
+        "base": {"equity": 90, "gold": 0, "debt": 5, "cash": 5},
+        "pe_sensitive": False,
+        "logic": "RJ believed in staying fully invested. He once said 'I have never tried to time the market and never will.' Maximum equity always.",
+        "gold_instrument": None,
+        "debt_instrument": "Liquid Fund",
+        "cash_note": "Keep as SIP reserve for averaging down on dips",
+    },
+    "buffett": {
+        "base": {"equity": 70, "gold": 5, "debt": 10, "cash": 15},
+        "pe_sensitive": True,
+        "logic": "Buffett is famous for holding cash. At Berkshire, cash reaches 25%+ at market peaks. He waits patiently for the fat pitch.",
+        "gold_instrument": "Sovereign Gold Bond",
+        "debt_instrument": "Short Duration Debt Fund",
+        "cash_note": "Buffett's dry powder — deploy when market offers genuine bargains",
+    },
+    "ben_graham": {
+        "base": {"equity": 50, "gold": 0, "debt": 40, "cash": 10},
+        "pe_sensitive": True,
+        "logic": "Graham's timeless rule: never less than 25% or more than 75% in stocks. Adjust within this band based on market valuation. When stocks are cheap, go to 75%. When expensive, go to 25%.",
+        "gold_instrument": None,
+        "debt_instrument": "Medium Duration Bond Fund",
+        "cash_note": "Margin of safety cash — never fully deploy into stocks",
+    },
+    "parag_parikh": {
+        "base": {"equity": 65, "gold": 10, "debt": 15, "cash": 10},
+        "pe_sensitive": True,
+        "logic": "PPFAS actively manages allocation. Their fund currently holds ~20% cash+debt. They believe gold is a necessary portfolio hedge against currency debasement.",
+        "gold_instrument": "Sovereign Gold Bond (SGB) — 2.5% tax-free interest + gold appreciation",
+        "debt_instrument": "Liquid Fund or FD",
+        "cash_note": "Opportunity fund — PPFAS deployed cash aggressively in March 2020",
+    },
+    "marcellus": {
+        "base": {"equity": 95, "gold": 0, "debt": 0, "cash": 5},
+        "pe_sensitive": False,
+        "logic": "Marcellus is always fully invested. Mukherjea believes their 12 stocks outperform any cash position at any valuation. No market timing.",
+        "gold_instrument": None,
+        "debt_instrument": None,
+        "cash_note": "Transaction reserve only",
+    },
+    "charlie_munger": {
+        "base": {"equity": 80, "gold": 0, "debt": 5, "cash": 15},
+        "pe_sensitive": True,
+        "logic": "Munger concentrated in very few positions. He kept significant cash for the rare exceptional opportunity. 'Opportunity cost is the only real cost.'",
+        "gold_instrument": None,
+        "debt_instrument": "T-Bills / Liquid Fund",
+        "cash_note": "Waiting for the exceptional — Munger would only deploy cash for truly wonderful businesses",
+    },
+    "vijay_kedia": {
+        "base": {"equity": 92, "gold": 0, "debt": 3, "cash": 5},
+        "pe_sensitive": False,
+        "logic": "Kedia stays almost fully invested. His SMILE framework requires long-term conviction — trying to time the market distracts from finding the right businesses.",
+        "gold_instrument": None,
+        "debt_instrument": "Liquid Fund",
+        "cash_note": "Reserve for adding to existing positions on dips",
+    },
+    "peter_lynch": {
+        "base": {"equity": 85, "gold": 0, "debt": 5, "cash": 10},
+        "pe_sensitive": True,
+        "logic": "Lynch was fully invested as a fund manager. For personal portfolios he recommended staying mostly invested but keeping some cash for PEG < 1 opportunities.",
+        "gold_instrument": None,
+        "debt_instrument": "Liquid Fund",
+        "cash_note": "PEG opportunity fund — deploy when you find PEG below 0.5",
+    },
+    "default": {
+        "base": {"equity": 70, "gold": 8, "debt": 12, "cash": 10},
+        "pe_sensitive": True,
+        "logic": "Balanced allocation adjusted for current market valuation.",
+        "gold_instrument": "Sovereign Gold Bond",
+        "debt_instrument": "Short Duration Debt Fund",
+        "cash_note": "Opportunity reserve",
+    },
+}
+
+def compute_asset_allocation(profile_id: str, total_capital: float, nifty_pe: float) -> dict:
+    """Compute final asset allocation based on profile + market PE."""
+    alloc_config = PROFILE_ALLOCATION.get(profile_id, PROFILE_ALLOCATION["default"])
+    base = dict(alloc_config["base"])
+    market = get_market_valuation(nifty_pe)
+
+    if alloc_config["pe_sensitive"]:
+        modifier = market["equity_modifier"]
+        equity_adj = round(base["equity"] * modifier)
+        reduction = base["equity"] - equity_adj
+        base["equity"] = equity_adj
+        # Add reduction to cash
+        base["cash"] = base.get("cash", 0) + reduction
+
+    # Normalize to 100%
+    total = sum(base.values())
+    for k in base:
+        base[k] = round(base[k] / total * 100, 1)
+
+    # Compute rupee amounts
+    amounts = {k: round(v / 100 * total_capital) for k, v in base.items()}
+    equity_capital = amounts["equity"]
+
+    return {
+        "allocation_pct": base,
+        "allocation_amt": amounts,
+        "equity_capital": equity_capital,
+        "nifty_pe": nifty_pe,
+        "market_valuation": market,
+        "logic": alloc_config["logic"],
+        "instruments": {
+            "gold": alloc_config.get("gold_instrument") or "Digital Gold / Gold ETF",
+            "debt": alloc_config.get("debt_instrument") or "Liquid Fund",
+            "cash": alloc_config.get("cash_note") or "Keep in savings account",
+        },
+        "rebalance_triggers": [
+            f"If Nifty PE drops below 16x, shift 10% from debt/cash to equity",
+            f"If Nifty PE rises above 28x, reduce equity by 15%, park in debt",
+            f"Rebalance annually or when any asset class drifts >5% from target",
+        ]
+    }
+
+
 CACHE_FILE = "stock_cache.json"
 SECTOR_CACHE_FILE = "sector_cache.json"
 
@@ -1141,6 +1308,174 @@ def get_portfolio_allocation(profile_id: str, stocks: list, capital: float) -> d
     }
 
 
+
+# ─── Legend Consensus Portfolio ───────────────────────────────────────────────
+def score_legend_consensus(stock: dict, sector_avgs: dict) -> dict:
+    """Score a stock across ALL profiles — consensus = breadth of agreement."""
+    profile_ids = list(INVESTOR_PROFILES.keys())
+    scores = []
+    for pid in profile_ids:
+        ps = score_profile(stock, pid, sector_avgs)
+        scores.append({"profile_id": pid, "profile_name": INVESTOR_PROFILES[pid]["name"],
+                       "score": ps["score"], "reasons": ps["reasons"]})
+    scores.sort(key=lambda x: x["score"], reverse=True)
+
+    qualifying = [s for s in scores if s["score"] >= 50]
+    strong = [s for s in scores if s["score"] >= 65]
+    avg_score = sum(s["score"] for s in scores) / len(scores) if scores else 0
+
+    # Consensus score: weighted average + breadth bonus
+    breadth_bonus = len(qualifying) * 2  # +2 per qualifying profile
+    consensus_score = min(round(avg_score * 0.6 + breadth_bonus * 0.4), 100)
+
+    tier = "All-Legend" if len(strong) >= 8 else "Strong Consensus" if len(qualifying) >= 5 else "Emerging Consensus" if len(qualifying) >= 3 else None
+
+    return {
+        "consensus_score": consensus_score,
+        "qualifying_profiles": len(qualifying),
+        "strong_profiles": len(strong),
+        "tier": tier,
+        "top_profiles": scores[:4],
+        "all_scores": scores,
+        "avg_score": round(avg_score, 1),
+    }
+
+
+def generate_stock_explanation(stock: dict, profile_id: str, sector_avgs: dict) -> dict:
+    """Generate rich, professional explanation of why a stock was selected."""
+    profile = INVESTOR_PROFILES.get(profile_id, {})
+    sector = stock.get("sector", "Unknown")
+    avgs = sector_avgs.get(sector, {})
+    name = stock.get("company_name", stock.get("symbol", ""))
+    symbol = stock.get("symbol", "")
+
+    def pct(v): return v * 100 if v is not None else None
+    def fmt_pct(v): return f"{pct(v):.1f}%" if v is not None else "N/A"
+    def vs_avg(val, avg_key, higher_better=True):
+        avg = avgs.get(avg_key)
+        if val is None or avg is None or avg == 0: return ""
+        diff = ((val - avg) / abs(avg)) * 100
+        symbol_str = "↑" if (higher_better and val > avg) or (not higher_better and val < avg) else "↓"
+        return f"{symbol_str} sector avg {fmt_pct(avg) if avg < 2 else f'{avg:.1f}x'}"
+
+    roe = stock.get("roe"); roce = stock.get("roce"); opm = stock.get("operating_margins")
+    pe = stock.get("pe_ratio"); pb = stock.get("pb_ratio"); de = stock.get("debt_to_equity")
+    rev_g = stock.get("revenue_growth"); earn_g = stock.get("earnings_growth")
+    ph = stock.get("promoter_holding"); price = stock.get("current_price")
+    high = stock.get("52w_high"); mc = (stock.get("market_cap") or 0) / 1e7
+
+    # Build qualifying metrics list
+    qualifying_metrics = []
+
+    if roe:
+        qualifying_metrics.append({
+            "metric": "ROE", "value": fmt_pct(roe), "sector_avg": fmt_pct(avgs.get("roe")),
+            "vs_sector": vs_avg(roe, "roe", True), "learn_id": "roe",
+            "explanation": f"Return on Equity of {fmt_pct(roe)} demonstrates how efficiently {name} generates profit from shareholder capital.",
+            "status": "better" if avgs.get("roe") and roe > avgs["roe"] * 1.05 else "inline",
+        })
+    if roce:
+        qualifying_metrics.append({
+            "metric": "ROCE", "value": fmt_pct(roce), "sector_avg": fmt_pct(avgs.get("roce")),
+            "vs_sector": vs_avg(roce, "roce", True), "learn_id": "roce",
+            "explanation": f"ROCE of {fmt_pct(roce)} reflects the quality of capital deployment across the entire business, not just equity.",
+            "status": "better" if avgs.get("roce") and roce > avgs["roce"] * 1.05 else "inline",
+        })
+    if opm:
+        qualifying_metrics.append({
+            "metric": "Operating Margin", "value": fmt_pct(opm), "sector_avg": fmt_pct(avgs.get("opm")),
+            "vs_sector": vs_avg(opm, "opm", True), "learn_id": "operating-margins",
+            "explanation": f"Operating margin of {fmt_pct(opm)} indicates the company retains {fmt_pct(opm)} of every rupee of revenue as operating profit.",
+            "status": "better" if avgs.get("opm") and opm > avgs["opm"] * 1.05 else "inline",
+        })
+    if de is not None:
+        qualifying_metrics.append({
+            "metric": "Debt/Equity", "value": f"{de:.2f}x", "sector_avg": f"{avgs.get('de', 0):.2f}x" if avgs.get('de') else "N/A",
+            "vs_sector": vs_avg(de, "de", False), "learn_id": "debt-equity",
+            "explanation": f"Debt-to-equity of {de:.2f}x shows {'a near debt-free balance sheet' if de < 0.3 else 'moderate leverage' if de < 1 else 'significant leverage'}.",
+            "status": "better" if avgs.get("de") and de < avgs["de"] * 0.9 else "inline",
+        })
+    if pe:
+        qualifying_metrics.append({
+            "metric": "P/E Ratio", "value": f"{pe:.1f}x", "sector_avg": f"{avgs.get('pe', 0):.1f}x" if avgs.get('pe') else "N/A",
+            "vs_sector": vs_avg(pe, "pe", False), "learn_id": "pe-ratio",
+            "explanation": f"P/E of {pe:.1f}x means investors are paying ₹{pe:.0f} for every ₹1 of annual earnings.",
+            "status": "better" if avgs.get("pe") and pe < avgs["pe"] * 0.9 else "worse" if avgs.get("pe") and pe > avgs["pe"] * 1.1 else "inline",
+        })
+    if rev_g:
+        qualifying_metrics.append({
+            "metric": "Revenue Growth", "value": fmt_pct(rev_g), "sector_avg": fmt_pct(avgs.get("rev_growth")),
+            "vs_sector": vs_avg(rev_g, "rev_growth", True), "learn_id": "revenue-growth",
+            "explanation": f"Revenue growing at {fmt_pct(rev_g)} year-over-year demonstrates the business is expanding its top line.",
+            "status": "better" if rev_g and pct(rev_g) >= 15 else "inline",
+        })
+
+    # Profile-specific full analysis paragraph
+    profile_name = profile.get("name", "")
+    analyses = {
+        "rj": f"{name} aligns with Rakesh Jhunjhunwala's conviction-driven approach to India's growth story. With ROE of {fmt_pct(roe)}, this business demonstrates the kind of capital efficiency RJ demanded before committing capital. He specifically sought companies where promoters had significant skin in the game{f' — promoter holding at {fmt_pct(ph)} reflects this' if ph else ''}. RJ's philosophy was to find businesses riding India's long-term secular growth trends and hold them through volatility. He held Titan for over 20 years and would have applied the same patience here.",
+        "buffett": f"This investment meets Warren Buffett's core criteria for what he calls a 'wonderful company.' The {fmt_pct(roe)} ROE demonstrates consistent ability to generate returns above the cost of capital — Buffett's primary quality filter. {'The near debt-free balance sheet reflects the kind of financial fortress Buffett seeks.' if de is not None and de < 0.3 else ''} Buffett evaluates whether he would be comfortable owning this business for 10 years if markets closed tomorrow. The pricing power implied by {fmt_pct(opm)} operating margins suggests a durable competitive moat.",
+        "marcellus": f"{name} passes Marcellus's rigorous forensic filter — a screen that eliminates 95% of Indian listed companies. Saurabh Mukherjea's Consistent Compounders Portfolio specifically targets businesses with ROCE consistently above 25% and minimal debt. The {fmt_pct(roce)} ROCE places this firmly in what Marcellus calls 'the clean and well-lit room' of Indian businesses. Marcellus holds positions for 3-5 years minimum, relying on earnings compounding rather than multiple expansion to generate returns.",
+        "ben_graham": f"From a Graham perspective, {name} presents the kind of quantitative value opportunity that the 'Father of Value Investing' sought. Graham's Intelligent Investor framework demands a margin of safety — the gap between intrinsic value and market price. {'The P/B of ' + f'{pb:.1f}x' + ' indicates the market values this business at ' + (f'{pb:.1f}x' + ' book value') if pb else ''} Graham would calculate intrinsic value based on normalised earnings power and asset values, investing only when a sufficient discount to this value exists.",
+        "vijay_kedia": f"Vijay Kedia's SMILE framework — Small in size, Medium in experience, Large in aspiration, Extra-large in market potential — is the lens through which this selection must be evaluated. {'With market cap of ₹' + f'{mc:.0f}' + ' Cr, this qualifies as the small/mid cap focus Kedia demands.' if mc < 20000 else ''} Kedia specifically avoids large caps, believing the asymmetric return potential exists only in companies that can grow 10x from their current size. He would examine whether this business addresses an Indian market that is still at early stages of development.",
+        "peter_lynch": f"Peter Lynch's GARP (Growth at Reasonable Price) framework evaluates {name} through the PEG ratio lens. Lynch famously said 'invest in what you know' — businesses with clear, understandable competitive advantages. {f'Revenue growth of {fmt_pct(rev_g)} demonstrates the earnings trajectory Lynch required.' if rev_g else ''} Lynch ran Fidelity Magellan to 29% annual returns by finding companies where growth was consistently underpriced by the market. He looked for boring businesses with exceptional fundamentals that institutional analysts ignored.",
+        "charlie_munger": f"Charlie Munger's investment philosophy centres on what he called 'wonderful businesses at fair prices' — companies with such durable competitive advantages that they can compound capital at high rates for decades without requiring additional capital. The {fmt_pct(roce)} ROCE is the metric Munger cared about most, as it measures raw business efficiency. Munger held extraordinarily few positions, demanding that each one meet an exceptionally high bar for business quality and management integrity.",
+        "parag_parikh": f"Parag Parikh Financial Advisory Services applies a behavioural finance lens to portfolio construction. PPFAS specifically seeks owner-operators — businesses where promoters have significant equity stake and think like owners, not employees. {f'The promoter holding of {fmt_pct(ph)} reflects this alignment.' if ph else ''} The fund is known for its low turnover and willingness to hold through market volatility, an approach that requires genuine conviction in the underlying business quality.",
+    }
+
+    full_analysis = analyses.get(profile_id,
+        f"{name} was selected based on its strong performance against {profile_name}'s investment criteria. The key metrics that qualified this stock demonstrate the business quality this investing style demands."
+    )
+
+    return {
+        "full_analysis": full_analysis,
+        "qualifying_metrics": qualifying_metrics[:5],
+        "one_liner": f"Selected for {fmt_pct(roe)} ROE{', ' + fmt_pct(opm) + ' OPM' if opm else ''}{', low debt' if de is not None and de < 0.3 else ''}",
+    }
+
+
+def generate_why_not(profile_id: str, near_misses: list, sector_avgs: dict) -> list:
+    """Explain why stocks almost made it but didn't qualify."""
+    results = []
+    for stock in near_misses[:3]:
+        name = stock.get("company_name", stock.get("symbol", ""))
+        symbol = stock.get("symbol", "")
+        ps = score_profile(stock, profile_id, sector_avgs)
+        score = ps["score"]
+
+        # Find the weakest metric
+        roe = stock.get("roe"); roce = stock.get("roce")
+        de = stock.get("debt_to_equity"); opm = stock.get("operating_margins")
+        pe = stock.get("pe_ratio"); ph = stock.get("promoter_holding")
+
+        def pct(v): return v * 100 if v else None
+
+        reasons = []
+        if profile_id == "buffett":
+            if roe and pct(roe) < 15: reasons.append(f"ROE of {pct(roe):.1f}% falls below Buffett's 20% threshold for consistent capital efficiency")
+            if de and de > 0.5: reasons.append(f"Debt/Equity of {de:.1f}x exceeds Buffett's preference for near debt-free balance sheets")
+            if pe and pe > 35: reasons.append(f"P/E of {pe:.1f}x suggests the market has already priced in the quality premium")
+        elif profile_id == "marcellus":
+            if de and de > 0.3: reasons.append(f"Debt/Equity of {de:.1f}x fails Marcellus's zero-debt forensic filter")
+            if roce and pct(roce) < 20: reasons.append(f"ROCE of {pct(roce):.1f}% below Marcellus's 25% minimum threshold")
+        elif profile_id == "rj":
+            if ph and ph < 0.35: reasons.append(f"Promoter holding of {pct(ph):.1f}% below RJ's conviction threshold")
+            if roe and pct(roe) < 18: reasons.append(f"ROE of {pct(roe):.1f}% insufficient for RJ's growth compounder criteria")
+        else:
+            if not reasons:
+                reasons.append(f"Composite score of {score}/100 did not meet the minimum threshold for this profile")
+
+        if reasons:
+            results.append({
+                "symbol": symbol,
+                "company_name": name,
+                "score": score,
+                "reason": reasons[0],
+                "learn_id": "roe" if "ROE" in (reasons[0] if reasons else "") else "debt-equity" if "Debt" in (reasons[0] if reasons else "") else "roce",
+            })
+    return results
+
+
 def build_entry(symbol, raw, sector_avgs=None):
     if sector_avgs is None: sector_avgs = {}
     scoring = score_stock(raw, sector_avgs)
@@ -1587,39 +1922,158 @@ def watchlist(symbols: str = Query(...)):
     results.sort(key=lambda x: x["scoring"]["composite"], reverse=True)
     return {"count": len(results), "stocks": results}
 
+@app.get("/api/market/pulse")
+def market_pulse():
+    nifty_pe = fetch_nifty_pe()
+    market = get_market_valuation(nifty_pe)
+    with _cache_lock:
+        stocks = list(_cache.values())
+    if not stocks:
+        return {"nifty_pe": nifty_pe, "market": market, "strong_buys": [], "near_lows": [], "top_sectors": [], "total_indexed": 0}
+    strong_buys = sorted([s for s in stocks if s["conviction"] == "Strong Buy"],
+                         key=lambda x: x["scoring"]["composite"], reverse=True)[:6]
+    near_lows = []
+    for s in stocks:
+        price = s.get("current_price"); low = s.get("52w_low"); high = s.get("52w_high")
+        if price and low and high and high > low:
+            pct_from_low = ((price - low) / (high - low)) * 100
+            if pct_from_low < 25:
+                near_lows.append({**s, "pct_from_low": round(pct_from_low, 1)})
+    near_lows = sorted(near_lows, key=lambda x: x["scoring"]["composite"], reverse=True)[:5]
+    sector_counts = {}
+    for s in stocks:
+        sec = s.get("sector", "Unknown")
+        if sec != "Unknown": sector_counts[sec] = sector_counts.get(sec, 0) + 1
+    top_sectors = sorted(sector_counts.items(), key=lambda x: x[1], reverse=True)[:6]
+    return {
+        "nifty_pe": nifty_pe,
+        "market": market,
+        "strong_buys": [{"symbol": s["symbol"], "company_name": s["company_name"],
+                         "score": s["scoring"]["composite"], "sector": s.get("sector"), "conviction": s["conviction"]} for s in strong_buys],
+        "near_lows": [{"symbol": s["symbol"], "company_name": s["company_name"],
+                       "pct_from_low": s["pct_from_low"], "score": s["scoring"]["composite"]} for s in near_lows],
+        "top_sectors": [{"sector": s[0], "count": s[1]} for s in top_sectors],
+        "total_indexed": len(stocks),
+        "last_updated": _cache_time.isoformat() if _cache_time else None,
+    }
+
+
 @app.post("/api/portfolio/build")
 def build_portfolio_endpoint(
     profile_id: str = Query(...),
     capital: float = Query(...),
     limit: int = Query(None),
+    mode: str = Query("single"),
 ):
+    nifty_pe = fetch_nifty_pe()
+
+    if mode == "consensus":
+        return build_consensus_portfolio_fn(capital, nifty_pe, limit)
+
     if profile_id not in INVESTOR_PROFILES:
         raise HTTPException(400, f"Unknown profile: {profile_id}")
+
+    asset_alloc = compute_asset_allocation(profile_id, capital, nifty_pe)
+    equity_capital = asset_alloc["equity_capital"]
     profile = INVESTOR_PROFILES[profile_id]
     target_n = limit or profile.get("portfolio_size", 15)
 
     with _cache_lock: stocks = list(_cache.values())
     if not stocks: raise HTTPException(503, "Cache not ready. Try again in a few minutes.")
-
     with _cache_lock: avgs = dict(_sector_averages)
+
     scored = []
     for s in stocks:
         ps = score_profile(s, profile_id, avgs)
         if ps["score"] >= 40:
             s = dict(s); s["profile_score"] = ps["score"]; s["profile_reasons"] = ps["reasons"]
             scored.append(s)
-
     scored.sort(key=lambda x: x["profile_score"], reverse=True)
     top = scored[:target_n]
-    if not top: raise HTTPException(404, "No stocks meet this profile's criteria")
+    near_misses = scored[target_n:target_n+6]
+    if not top: raise HTTPException(404, "No stocks meet this profile criteria")
 
-    portfolio = get_portfolio_allocation(profile_id, top, capital)
+    portfolio = get_portfolio_allocation(profile_id, top, equity_capital)
+
+    for pos in portfolio["positions"]:
+        stock_data = next((s for s in top if s["symbol"] == pos["symbol"]), {})
+        explanation = generate_stock_explanation(stock_data, profile_id, avgs)
+        pos["full_analysis"] = explanation["full_analysis"]
+        pos["qualifying_metrics"] = explanation["qualifying_metrics"]
+        pos["one_liner"] = explanation["one_liner"]
+
+    why_not = generate_why_not(profile_id, near_misses, avgs)
+
     portfolio.update({
-        "profile_id": profile_id,
-        "profile_name": profile["name"],
-        "profile_philosophy": profile["philosophy"],
-        "profile_bio": profile["bio"],
-        "capital_input": capital,
-        "generated_at": datetime.now().isoformat(),
+        "profile_id": profile_id, "profile_name": profile["name"],
+        "profile_philosophy": profile["philosophy"], "profile_bio": profile["bio"],
+        "capital_input": capital, "equity_capital": equity_capital,
+        "asset_allocation": asset_alloc, "why_not": why_not,
+        "generated_at": datetime.now().isoformat(), "mode": "single",
     })
     return portfolio
+
+
+def build_consensus_portfolio_fn(capital: float, nifty_pe: float, limit: int = None) -> dict:
+    asset_alloc = compute_asset_allocation("parag_parikh", capital, nifty_pe)
+    equity_capital = asset_alloc["equity_capital"]
+    with _cache_lock: stocks = list(_cache.values())
+    with _cache_lock: avgs = dict(_sector_averages)
+
+    consensus_scored = []
+    for s in stocks:
+        cs = score_legend_consensus(s, avgs)
+        if cs["tier"]:
+            s = dict(s); s["consensus_score"] = cs["consensus_score"]
+            s["consensus_data"] = cs; s["profile_score"] = cs["consensus_score"]
+            consensus_scored.append(s)
+    consensus_scored.sort(key=lambda x: x["consensus_score"], reverse=True)
+    top = consensus_scored[:limit or 20]
+    if not top: raise HTTPException(404, "Not enough consensus stocks found")
+
+    total_q = sum(s["consensus_data"]["qualifying_profiles"] for s in top)
+    weights = [s["consensus_data"]["qualifying_profiles"] / total_q for s in top]
+    total_w = sum(weights)
+    weights = [w / total_w for w in weights]
+
+    positions = []
+    for i, (stock, weight) in enumerate(zip(top, weights)):
+        price = stock.get("current_price") or 0
+        shares = int(equity_capital * weight / price) if price > 0 else 0
+        amount = shares * price if price > 0 else equity_capital * weight
+        cs_data = stock["consensus_data"]
+        explanation = generate_stock_explanation(stock, "buffett", avgs)
+        positions.append({
+            "rank": i+1, "symbol": stock["symbol"], "company_name": stock["company_name"],
+            "sector": stock.get("sector","Unknown"), "current_price": price,
+            "weight_pct": round(weight*100,1), "amount": round(amount), "shares": shares,
+            "profile_score": stock["consensus_score"], "consensus_tier": cs_data["tier"],
+            "qualifying_profiles": cs_data["qualifying_profiles"],
+            "top_agreeing_profiles": [{"name": p["profile_name"], "score": p["score"]} for p in cs_data["top_profiles"][:3]],
+            "conviction": stock["conviction"],
+            "why_included": f"{cs_data['qualifying_profiles']} legendary investors agree on this stock",
+            "full_analysis": f"This stock achieves rare multi-profile consensus across {cs_data['qualifying_profiles']} legendary investor frameworks with an average score of {cs_data['avg_score']:.0f}/100. The profiles rating it highest are {', '.join(p['profile_name'] for p in cs_data['top_profiles'][:2])}. Multi-profile consensus is significant because it means the stock simultaneously satisfies value (Graham), quality (Buffett/Marcellus), and growth (RJ/Lynch) criteria — an extremely rare combination in Indian markets.",
+            "qualifying_metrics": explanation["qualifying_metrics"][:4],
+            "one_liner": explanation["one_liner"],
+        })
+
+    sector_exposure = {}
+    for pos in positions:
+        sec = pos["sector"]
+        if sec != "Unknown": sector_exposure[sec] = round(sector_exposure.get(sec,0)+pos["weight_pct"],1)
+
+    return {
+        "positions": positions, "total_stocks": len(positions),
+        "total_capital": capital, "equity_capital": equity_capital,
+        "total_deployed": round(sum(p["amount"] for p in positions)),
+        "sector_exposure": sector_exposure, "asset_allocation": asset_alloc,
+        "portfolio_rationale": f"This Legend Consensus portfolio selects stocks where multiple legendary investors independently agree. Position sizing is weighted by consensus breadth — broader agreement earns larger allocation. These are the rarest, highest-conviction opportunities in Indian markets.",
+        "entry_strategy": "Enter systematically over 3-6 months to average entry prices. The consensus approach reduces single-style risk.",
+        "rebalance_note": "Quarterly review. Replace stocks dropping below 3-profile consensus. Add new consensus entrants.",
+        "why_not": [], "profile_id": "consensus", "profile_name": "Legend Consensus",
+        "profile_philosophy": "The intersection of all legendary investor philosophies — stocks that simultaneously pass value, quality, and growth filters.",
+        "profile_bio": "A meta-strategy finding common ground between 14 legendary investors.",
+        "capital_input": capital, "generated_at": datetime.now().isoformat(), "mode": "consensus",
+    }
+
+
