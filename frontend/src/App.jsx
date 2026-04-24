@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import { Search, Filter, TrendingUp, List, RefreshCw, AlertCircle, Users, BarChart2, X, Download, Menu, BookOpen, ChevronDown, ChevronUp, ArrowRight, Zap } from "lucide-react";
 import StockCard from "./components/StockCard";
 import StockDetail from "./components/StockDetail";
@@ -405,7 +405,7 @@ export default function App() {
 
         {/* ── HOME ── */}
         {tab==="home"&&(
-          <HomeTab pulse={pulse} onViewStock={s=>{setSelectedStock(s);}} onSwitchTab={switchTab}
+          <HomeTab pulse={pulse} onViewStock={s=>setSelectedStock(s)} onSwitchTab={switchTab}
             quizStep={quizStep} setQuizStep={setQuizStep} quizAnswers={quizAnswers}
             handleQuizAnswer={handleQuizAnswer} quizResult={quizResult} setQuizResult={setQuizResult}
             setQuizAnswers={setQuizAnswers} setPortfolioProfile={setPortfolioProfile} />
@@ -743,7 +743,16 @@ export default function App() {
 }
 
 // ─── Home Tab ─────────────────────────────────────────────────────────────────
-function HomeTab({ pulse, onSwitchTab, quizStep, setQuizStep, quizAnswers, handleQuizAnswer, quizResult, setQuizResult, setQuizAnswers, setPortfolioProfile }) {
+function HomeTab({ pulse, onViewStock, onSwitchTab, quizStep, setQuizStep, quizAnswers, handleQuizAnswer, quizResult, setQuizResult, setQuizAnswers, setPortfolioProfile }) {
+  const [loadingSymbol, setLoadingSymbol] = React.useState(null);
+  const handlePulseClick = async (symbol) => {
+    setLoadingSymbol(symbol);
+    try {
+      const r = await fetch(`${BASE_URL}/api/stock/${symbol}`);
+      if (r.ok) { const d = await r.json(); onViewStock(d); }
+    } catch {}
+    setLoadingSymbol(null);
+  };
   if (quizStep >= 0 && !quizResult) {
     const q = QUIZ_QUESTIONS[quizStep];
     return (
@@ -836,8 +845,11 @@ function HomeTab({ pulse, onSwitchTab, quizStep, setQuizStep, quizAnswers, handl
               <div>
                 <div className="pulse-section-title">Strong Buy Zone</div>
                 {pulse.strong_buys?.length > 0 ? pulse.strong_buys.map(s=>(
-                  <div key={s.symbol} className="pulse-stock-row">
-                    <div><div className="pulse-symbol">{s.symbol}</div><div className="pulse-name">{s.company_name?.split(" ").slice(0,3).join(" ")}</div></div>
+                  <div key={s.symbol} className="pulse-stock-row" onClick={()=>handlePulseClick(s.symbol)} style={{cursor:"pointer"}}>
+                    <div>
+                      <div className="pulse-symbol">{s.symbol}{loadingSymbol===s.symbol&&<span style={{marginLeft:6,fontSize:10,color:"var(--text3)"}}>loading...</span>}</div>
+                      <div className="pulse-name">{s.company_name?.split(" ").slice(0,3).join(" ")}</div>
+                    </div>
                     <div className="pulse-score" style={{color:SCORE_COLOR(s.score)}}>{s.score}</div>
                   </div>
                 )) : <div style={{fontSize:12,color:"var(--text3)",padding:"8px 0"}}>Cache building — check back in a few minutes</div>}
@@ -845,10 +857,11 @@ function HomeTab({ pulse, onSwitchTab, quizStep, setQuizStep, quizAnswers, handl
               <div>
                 <div className="pulse-section-title">Near 52W Lows</div>
                 {pulse.near_lows?.length > 0 ? pulse.near_lows.map(s=>(
-                  <div key={s.symbol} className="pulse-stock-row">
-                    <div><div className="pulse-symbol">{s.symbol}</div><div className="pulse-name" style={{color:"var(--amber)"}}>
-  {s.pct_from_low?.toFixed(0)}% above 52W low
-</div></div>
+                  <div key={s.symbol} className="pulse-stock-row" onClick={()=>handlePulseClick(s.symbol)} style={{cursor:"pointer"}}>
+                    <div>
+                      <div className="pulse-symbol">{s.symbol}{loadingSymbol===s.symbol&&<span style={{marginLeft:6,fontSize:10,color:"var(--text3)"}}>loading...</span>}</div>
+                      <div className="pulse-name" style={{color:"var(--amber)"}}>{s.pct_from_low?.toFixed(0)}% above 52W low</div>
+                    </div>
                     <div className="pulse-score" style={{color:SCORE_COLOR(s.score)}}>{s.score}</div>
                   </div>
                 )) : <div style={{fontSize:12,color:"var(--text3)",padding:"8px 0"}}>Cache building — check back shortly</div>}
