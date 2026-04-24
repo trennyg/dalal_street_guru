@@ -846,7 +846,9 @@ function HomeTab({ pulse, onSwitchTab, quizStep, setQuizStep, quizAnswers, handl
                 <div className="pulse-section-title">Near 52W Lows</div>
                 {pulse.near_lows?.length > 0 ? pulse.near_lows.map(s=>(
                   <div key={s.symbol} className="pulse-stock-row">
-                    <div><div className="pulse-symbol">{s.symbol}</div><div className="pulse-name" style={{color:"var(--amber)"}}>↓ {s.pct_from_low?.toFixed(0)}% from low</div></div>
+                    <div><div className="pulse-symbol">{s.symbol}</div><div className="pulse-name" style={{color:"var(--amber)"}}>
+  {s.pct_from_low?.toFixed(0)}% above 52W low
+</div></div>
                     <div className="pulse-score" style={{color:SCORE_COLOR(s.score)}}>{s.score}</div>
                   </div>
                 )) : <div style={{fontSize:12,color:"var(--text3)",padding:"8px 0"}}>Cache building — check back shortly</div>}
