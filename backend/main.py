@@ -528,42 +528,72 @@ def score_stock(d: dict, sector_avgs: dict) -> dict:
 
     # ── 2. GROWTH (25%) ───────────────────────────────────────────────────────
     g_score = 0
+    g_has_data = False
     if rev_growth is not None:
+        g_has_data = True
         rg_pct = pct(rev_growth)
         if rg_pct >= 25: g_score += 40; reasons.append(f"Revenue growing {rg_pct:.1f}%")
         elif rg_pct >= 15: g_score += 30; reasons.append(f"Revenue growing {rg_pct:.1f}%")
-        elif rg_pct >= 8: g_score += 20
-        elif rg_pct >= 0: g_score += 10
-        else: g_score += 0
+        elif rg_pct >= 8: g_score += 22
+        elif rg_pct >= 0: g_score += 14
+        else: g_score += 5
 
     if earn_growth is not None:
+        g_has_data = True
         eg_pct = pct(earn_growth)
         if eg_pct >= 25: g_score += 40; reasons.append(f"Earnings growing {eg_pct:.1f}%")
-        elif eg_pct >= 15: g_score += 30
-        elif eg_pct >= 8: g_score += 20
-        elif eg_pct >= 0: g_score += 10
+        elif eg_pct >= 15: g_score += 30; reasons.append(f"Earnings growing {eg_pct:.1f}%")
+        elif eg_pct >= 8: g_score += 22
+        elif eg_pct >= 0: g_score += 14
+        else: g_score += 5
 
-    if rev_growth is None and earn_growth is None: g_score = 40  # neutral
+    # If no growth data available, infer from ROE/ROCE quality
+    # A company with high ROE likely has decent growth
+    if not g_has_data:
+        if roe and pct(roe) >= 25: g_score = 55; reasons.append("High ROE implies growth capability")
+        elif roe and pct(roe) >= 18: g_score = 48
+        elif roe and pct(roe) >= 12: g_score = 40
+        else: g_score = 35  # neutral-ish default
+
     g_total = min(g_score, 100)
 
     # ── 3. SAFETY (20%) ───────────────────────────────────────────────────────
     s_score = 0
-    de_s = vs_sector(de, "de", False) if de is not None else 50
-    s_score += de_s * 0.40
-    if de is not None and de < 0.3: reasons.append("Strong balance sheet")
+    s_has_data = False
 
-    if current_ratio:
+    if de is not None:
+        s_has_data = True
+        de_s = vs_sector(de, "de", False)
+        s_score += de_s * 0.40
+        if de < 0.1: reasons.append("Near debt-free")
+        elif de < 0.3: reasons.append("Low debt")
+
+    if current_ratio is not None:
+        s_has_data = True
         if current_ratio >= 2: s_score += 30
         elif current_ratio >= 1.5: s_score += 22
-        elif current_ratio >= 1: s_score += 12
-        else: s_score += 0
+        elif current_ratio >= 1: s_score += 14
+        else: s_score += 5
 
-    if ic:
+    if ic is not None:
+        s_has_data = True
         if ic >= 5: s_score += 30
-        elif ic >= 3: s_score += 20
-        elif ic >= 1.5: s_score += 10
+        elif ic >= 3: s_score += 22
+        elif ic >= 1.5: s_score += 12
+        else: s_score += 5
     elif de is not None and de < 0.1:
-        s_score += 25  # practically debt free
+        s_score += 25
+
+    # If no safety data, use pros/cons text as proxy
+    if not s_has_data:
+        pros_text = " ".join(d.get("pros", [])).lower()
+        cons_text = " ".join(d.get("cons", [])).lower()
+        if "debt free" in pros_text or "zero debt" in pros_text:
+            s_score = 70; reasons.append("Debt-free (from fundamentals)")
+        elif "debt" in cons_text or "leverage" in cons_text:
+            s_score = 30
+        else:
+            s_score = 50  # neutral when no data
 
     s_total = min(s_score, 100)
 
@@ -587,13 +617,22 @@ def score_stock(d: dict, sector_avgs: dict) -> dict:
 
     # ── 5. MOMENTUM (10%) ─────────────────────────────────────────────────────
     m_score = 50  # neutral default
-    if price and high and high > 0 and d.get("52w_low"):
-        low = d["52w_low"]
-        price_range_pct = ((price - low) / (high - low) * 100) if high > low else 50
-        if price_range_pct >= 70: m_score = 80
-        elif price_range_pct >= 50: m_score = 60
-        elif price_range_pct >= 30: m_score = 45
-        else: m_score = 30
+    if price and high and high > 0:
+        pct_from_high = ((high - price) / high) * 100
+        low = d.get("52w_low")
+        if low and high > low:
+            price_range_pct = ((price - low) / (high - low) * 100)
+            if price_range_pct >= 80: m_score = 85
+            elif price_range_pct >= 60: m_score = 70
+            elif price_range_pct >= 40: m_score = 55
+            elif price_range_pct >= 20: m_score = 40
+            else: m_score = 28
+        else:
+            # Just use distance from 52w high
+            if pct_from_high <= 5: m_score = 75
+            elif pct_from_high <= 15: m_score = 60
+            elif pct_from_high <= 30: m_score = 45
+            else: m_score = 32
     m_total = min(m_score, 100)
 
     # ── Composite ─────────────────────────────────────────────────────────────
