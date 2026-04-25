@@ -22,6 +22,7 @@ function MetricRow({ label, value, sectorAvg, lowerBetter = false, format = "num
     : format === "num" ? (value !== null && value !== undefined ? fmtNum(value) : "N/A")
     : (value ?? "N/A");
 
+  // Try to get sector avg from sector_comparison prop
   const avgDisplay = sectorAvg !== null && sectorAvg !== undefined
     ? (format === "pct" ? fmtPct(sectorAvg) : fmtNum(sectorAvg))
     : "—";
@@ -236,17 +237,19 @@ export default function StockDetail({ stock, onClose }) {
                   <div style={{ fontSize: 10, color: "var(--blue)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.8, fontFamily: "var(--font-mono)", marginBottom: 14 }}>
                     Score Breakdown
                   </div>
-                  {Object.entries(stock.scoring.scores || {}).map(([key, val]) => (
-                    <div key={key} style={{ marginBottom: 10 }}>
+                  {(stock.scoring.sub_scores || Object.entries(stock.scoring.scores || {}).map(([k,v])=>({label:k,score:v}))).map((s) => {
+                    const label = s.label || s.key; const val = s.score ?? s.value ?? 0;
+                    return (
+                    <div key={label} style={{ marginBottom: 10 }}>
                       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                        <span style={{ fontSize: 12.5, color: "var(--text2)", fontWeight: 500, textTransform: "capitalize" }}>{key}</span>
+                        <span style={{ fontSize: 12.5, color: "var(--text2)", fontWeight: 500, textTransform: "capitalize" }}>{label}</span>
                         <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", fontWeight: 700, color: SCORE_COLOR(val) }}>{val}/100</span>
                       </div>
                       <div style={{ height: 5, background: "var(--surface3)", borderRadius: 3 }}>
                         <div style={{ height: "100%", width: `${val}%`, background: SCORE_COLOR(val), borderRadius: 3, transition: "width 0.5s ease" }} />
                       </div>
                     </div>
-                  ))}
+                  );})}
                 </div>
 
                 {/* Analyst */}

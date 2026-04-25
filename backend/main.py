@@ -646,18 +646,20 @@ def fetch_stock_data(symbol: str) -> dict:
     # Apply hardcoded sector as fallback
     merged["sector"] = get_sector_for_symbol(symbol, merged.get("sector", "Unknown"))
     
-    # Fill missing fields from screener
-    fill_from_screener = [
-        "roce", "operating_margins", "promoter_holding", 
-        "pros", "cons", "quarterly_revenue", "quarterly_profit",
-        "sector", "industry"
-    ]
-    for field in fill_from_screener:
-        yf_val = yf_data.get(field)
+    # Fill ALL missing fields from screener
+    for field in sc_data:
+        yf_val = merged.get(field)
         sc_val = sc_data.get(field)
-        # Use screener value if yfinance is None/empty
-        if (yf_val is None or yf_val == [] or yf_val == "") and sc_val:
+        if (yf_val is None or yf_val == [] or yf_val == "") and sc_val not in (None, [], ""):
             merged[field] = sc_val
+    
+    # Special: compute ebitda if missing
+    if not merged.get("ebitda") and merged.get("revenue") and merged.get("operating_margins"):
+        merged["ebitda"] = merged["revenue"] * merged["operating_margins"]
+    
+    # Special: compute ev_ebitda if missing  
+    if not merged.get("ev_ebitda") and merged.get("market_cap") and merged.get("ebitda") and merged["ebitda"] > 0:
+        merged["ev_ebitda"] = merged["market_cap"] / merged["ebitda"]
     
     # Also override sector if yfinance gave generic sector
     if sc_data.get("sector") and sc_data["sector"] != "Unknown":
@@ -697,7 +699,11 @@ def compute_sector_averages(cache: dict) -> dict:
 
 
 def get_sector_comparison(stock: dict, sector_avgs: dict) -> dict:
+    symbol = stock.get("symbol", "")
     sector = stock.get("sector", "Unknown")
+    # Use hardcoded map if sector is Unknown
+    if sector == "Unknown" and symbol in NSE_SECTOR_MAP:
+        sector = NSE_SECTOR_MAP[symbol]
     avgs = sector_avgs.get(sector, {})
     if not avgs: return {}
     result = {}
@@ -732,6 +738,9 @@ def get_sector_comparison(stock: dict, sector_avgs: dict) -> dict:
 # ─── Sector-relative scoring (5 dimensions) ──────────────────────────────────
 def score_stock(d: dict, sector_avgs: dict) -> dict:
     sector = d.get("sector", "Unknown")
+    symbol = d.get("symbol", "")
+    if sector == "Unknown" and symbol in NSE_SECTOR_MAP:
+        sector = NSE_SECTOR_MAP[symbol]
     avgs = sector_avgs.get(sector, {})
 
     def pct(v): return v * 100 if v is not None else None
@@ -945,6 +954,13 @@ def score_stock(d: dict, sector_avgs: dict) -> dict:
             "value": round(v_total),
             "momentum": round(m_total),
         },
+        "sub_scores": [
+            {"label": "Quality", "score": round(q_total)},
+            {"label": "Growth", "score": round(g_total)},
+            {"label": "Safety", "score": round(s_total)},
+            {"label": "Value", "score": round(v_total)},
+            {"label": "Momentum", "score": round(m_total)},
+        ],
         "top_reasons": list(dict.fromkeys(reasons))[:5],
         "sector_relative": True,
     }
@@ -1905,6 +1921,9 @@ def generate_why_not(profile_id: str, near_misses: list, sector_avgs: dict) -> l
 
 def build_entry(symbol, raw, sector_avgs=None):
     if sector_avgs is None: sector_avgs = {}
+    # Ensure sector is set correctly
+    if not raw.get("sector") or raw.get("sector") == "Unknown":
+        raw["sector"] = NSE_SECTOR_MAP.get(symbol, "Unknown")
     scoring = score_stock(raw, sector_avgs)
     matching_profiles = get_matching_profiles(raw, sector_avgs)
     sector_comparison = get_sector_comparison(raw, sector_avgs)
@@ -2199,13 +2218,20 @@ async def startup():
     loaded = load_cache()
     if loaded:
         age_h = (datetime.now() - _cache_time).total_seconds() / 3600
-        # Always recompute sector averages from loaded cache
-        if not _sector_averages:
-            with _cache_lock:
-                avgs = compute_sector_averages(_cache)
-            with _cache_lock:
-                _sector_averages = avgs
-            print(f"Computed sector averages: {len(_sector_averages)} sectors")
+        # Apply hardcoded sectors to cached stocks first
+        updated = 0
+        with _cache_lock:
+            for sym, stock in _cache.items():
+                if stock.get("sector", "Unknown") == "Unknown" and sym in NSE_SECTOR_MAP:
+                    stock["sector"] = NSE_SECTOR_MAP[sym]
+                    updated += 1
+        if updated: print(f"Applied hardcoded sectors to {updated} stocks")
+        # Always recompute sector averages
+        with _cache_lock:
+            avgs = compute_sector_averages(_cache)
+        with _cache_lock:
+            _sector_averages = avgs
+        print(f"Computed sector averages: {len(_sector_averages)} sectors")
         # Rebuild if stale or missing merged data
         sample = list(_cache.values())[:5] if _cache else []
         needs_rebuild = age_h > 8 or any(s.get("data_source") not in ("merged","yfinance") for s in sample)
@@ -2442,7 +2468,7 @@ def build_portfolio_endpoint(
     scored = []
     for s in stocks:
         ps = score_profile(s, profile_id, avgs)
-        if ps["score"] >= 40:
+        if ps["score"] >= 25:  # Lower threshold - let more stocks through
             s = dict(s); s["profile_score"] = ps["score"]; s["profile_reasons"] = ps["reasons"]
             scored.append(s)
     scored.sort(key=lambda x: x["profile_score"], reverse=True)
