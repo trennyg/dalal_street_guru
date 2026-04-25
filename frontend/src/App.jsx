@@ -336,8 +336,8 @@ export default function App() {
       const profileId=portfolioMode==="consensus"?"rj":(portfolioProfile?.id||"rj");
       const p=new URLSearchParams({profile_id:profileId,capital,mode:portfolioMode});
       const r=await fetch(`${BASE_URL}/api/portfolio/build?${p}`,{method:"POST"});
-      if(!r.ok) throw new Error("Portfolio build failed");
       const d=await r.json();
+      if(!r.ok) throw new Error(d.detail || d.message || `Build failed (${r.status})`);
       setPortfolio(d);
     }catch(e){setError(e.message);}finally{setPortfolioLoading(false);}
   },[portfolioProfile,capitalInput,portfolioMode]);
