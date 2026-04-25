@@ -265,6 +265,81 @@ NIFTY_500 = [
 ]
 NIFTY_500 = list(dict.fromkeys(NIFTY_500))  # deduplicate
 
+# ─── Hardcoded sector map for immediate sector avg computation ────────────────
+NSE_SECTOR_MAP = {
+    # Banking & Finance
+    "HDFCBANK":"Banking","ICICIBANK":"Banking","SBIN":"Banking","KOTAKBANK":"Banking",
+    "AXISBANK":"Banking","INDUSINDBK":"Banking","BANKBARODA":"Banking","PNB":"Banking",
+    "CANBK":"Banking","UNIONBANK":"Banking","IDFCFIRSTB":"Banking","FEDERALBNK":"Banking",
+    "BANDHANBNK":"Banking","RBLBANK":"Banking","INDIANB":"Banking","KARURVYSYA":"Banking",
+    "BAJFINANCE":"NBFC","BAJAJFINSV":"NBFC","CHOLAFIN":"NBFC","MUTHOOTFIN":"NBFC",
+    "MANAPPURAM":"NBFC","SHRIRAMFIN":"NBFC","LICHSGFIN":"NBFC","CANFINHOME":"NBFC",
+    "HDFCLIFE":"Insurance","SBILIFE":"Insurance","ICICIGI":"Insurance","ICICIPRULI":"Insurance",
+    "LICI":"Insurance","HDFCAMC":"Asset Management","ABCAPITAL":"NBFC",
+    # IT
+    "TCS":"IT","INFOSYS":"IT","HCLTECH":"IT","WIPRO":"IT","TECHM":"IT",
+    "LTIM":"IT","MPHASIS":"IT","COFORGE":"IT","PERSISTENT":"IT","OFSS":"IT",
+    "TATAELXSI":"IT","LTTS":"IT","KPITTECH":"IT","HAPPSTMNDS":"IT","ZENSARTECH":"IT",
+    # Consumer/FMCG
+    "HINDUNILVR":"FMCG","ITC":"FMCG","NESTLEIND":"FMCG","BRITANNIA":"FMCG",
+    "DABUR":"FMCG","MARICO":"FMCG","COLPAL":"FMCG","GODREJCP":"FMCG",
+    "EMAMILTD":"FMCG","TATACONSUM":"FMCG","RADICO":"FMCG","VBL":"FMCG",
+    "MCDOWELL-N":"FMCG","UBL":"FMCG","PGHH":"FMCG","GSKCONS":"FMCG",
+    # Pharma
+    "SUNPHARMA":"Pharma","DRREDDY":"Pharma","CIPLA":"Pharma","DIVISLAB":"Pharma",
+    "TORNTPHARM":"Pharma","AUROPHARMA":"Pharma","LUPIN":"Pharma","ALKEM":"Pharma",
+    "BIOCON":"Pharma","GLAND":"Pharma","NATCOPHARM":"Pharma","IPCALAB":"Pharma",
+    "ABBOTINDIA":"Pharma","PFIZER":"Pharma","LAURUSLABS":"Pharma","GRANULES":"Pharma",
+    # Auto
+    "MARUTI":"Auto","TATAMOTORS":"Auto","BAJAJ-AUTO":"Auto","HEROMOTOCO":"Auto",
+    "EICHERMOT":"Auto","TVSMOTORS":"Auto","ASHOKLEY":"Auto","APOLLOTYRE":"Auto",
+    "CEATLTD":"Auto","BALKRISIND":"Auto","MOTHERSON":"Auto","SONACOMS":"Auto",
+    "BOSCHLTD":"Auto","ENDURANCE":"Auto","ESCORTS":"Auto","TIINDIA":"Auto",
+    # Energy & Oil
+    "RELIANCE":"Energy","ONGC":"Energy","BPCL":"Energy","IOC":"Energy",
+    "HINDPETRO":"Energy","OIL":"Energy","GAIL":"Energy","PETRONET":"Energy",
+    "ATGL":"Energy","GUJGASLTD":"Energy","IGL":"Energy","MGL":"Energy",
+    # Metals & Mining
+    "TATASTEEL":"Metals","JSWSTEEL":"Metals","HINDALCO":"Metals","SAIL":"Metals",
+    "NMDC":"Metals","COALINDIA":"Metals","VEDL":"Metals","HINDCOPPER":"Metals",
+    "NATIONALUM":"Metals","AIAENG":"Metals","GRAPHITE":"Metals","GPIL":"Metals",
+    # Cement
+    "ULTRACEMCO":"Cement","AMBUJACEM":"Cement","RAMCOCEM":"Cement","DALBHARAT":"Cement",
+    "JKCEMENT":"Cement","SHREECEM":"Cement","JKLAKSHMI":"Cement","HEIDELBERG":"Cement",
+    # Real Estate
+    "DLF":"Real Estate","GODREJPROP":"Real Estate","PRESTIGE":"Real Estate",
+    "OBEROIRLTY":"Real Estate","PHOENIXLTD":"Real Estate","BRIGADE":"Real Estate",
+    # Capital Goods
+    "LT":"Capital Goods","SIEMENS":"Capital Goods","ABB":"Capital Goods",
+    "HAL":"Capital Goods","BEL":"Capital Goods","BHEL":"Capital Goods",
+    "CGPOWER":"Capital Goods","POLYCAB":"Capital Goods","HAVELLS":"Capital Goods",
+    "SCHAEFFLER":"Capital Goods","TIMKEN":"Capital Goods","ELGIEQUIP":"Capital Goods",
+    # Paints & Chemicals
+    "ASIANPAINT":"Paints","BERGEPAINT":"Paints","KANSAINER":"Paints","INDPAINT":"Paints",
+    "PIDILITIND":"Chemicals","DEEPAKNTR":"Chemicals","NAVINFLUOR":"Chemicals",
+    "FLUOROCHEM":"Chemicals","SUDARSCHEM":"Chemicals","VINATIORGA":"Chemicals",
+    "FINEORG":"Chemicals","NOCIL":"Chemicals","DCMSHRIRAM":"Chemicals",
+    # Consumer Durables
+    "TITAN":"Consumer Durables","VOLTAS":"Consumer Durables","WHIRLPOOL":"Consumer Durables",
+    "CROMPTON":"Consumer Durables","DIXON":"Consumer Durables","AMBER":"Consumer Durables",
+    "VGUARD":"Consumer Durables","SYMPHONY":"Consumer Durables","HAVELLS":"Consumer Durables",
+    # Telecom
+    "BHARTIARTL":"Telecom","INDUSTOWER":"Telecom","TATACOMM":"Telecom",
+    # Retail
+    "DMART":"Retail","TRENT":"Retail","SHOPERSTOP":"Retail","ZOMATO":"Retail",
+    # Specialty
+    "NAUKRI":"Internet","NYKAA":"Internet","POLICYBZR":"Insurance",
+    "IRCTC":"Travel","INDIGO":"Aviation","SPICEJET":"Aviation",
+    "PAGEIND":"Textiles","WELSPUNIND":"Textiles","TRIDENT":"Textiles",
+}
+
+def get_sector_for_symbol(symbol: str, scraped_sector: str) -> str:
+    """Return best sector for a symbol, using hardcoded map as fallback."""
+    if scraped_sector and scraped_sector not in ("Unknown", ""):
+        return scraped_sector
+    return NSE_SECTOR_MAP.get(symbol, "Unknown")
+
+
 # ─── yfinance data fetch ───────────────────────────────────────────────────────
 def fetch_yfinance(symbol: str) -> dict:
     """Fetch comprehensive data from Yahoo Finance."""
@@ -395,6 +470,7 @@ def fetch_yfinance(symbol: str) -> dict:
         if pb and current_price and pb > 0:
             book_value = current_price / pb
 
+        sector = get_sector_for_symbol(symbol, sector)
         return {
             "company_name": company_name,
             "sector": sector,
@@ -521,6 +597,7 @@ def fetch_screener_fallback(symbol: str) -> dict:
             pros = [li.get_text(strip=True) for li in soup.select(".pros li")][:4]
             cons = [li.get_text(strip=True) for li in soup.select(".cons li")][:4]
 
+            sector = get_sector_for_symbol(symbol, sector)
             return {
                 "company_name": company_name, "sector": sector, "industry": sector,
                 "description": "", "website": "", "employees": None,
@@ -566,6 +643,8 @@ def fetch_stock_data(symbol: str) -> dict:
     # Merge: yfinance is primary, screener fills gaps
     merged = dict(yf_data)
     merged["data_source"] = "merged"
+    # Apply hardcoded sector as fallback
+    merged["sector"] = get_sector_for_symbol(symbol, merged.get("sector", "Unknown"))
     
     # Fill missing fields from screener
     fill_from_screener = [
@@ -2188,6 +2267,14 @@ def get_education_item(content_id: str):
 
 @app.get("/api/sector-averages")
 def sector_averages():
+    global _sector_averages
+    # If empty, recompute on the fly
+    if not _sector_averages and _cache:
+        with _cache_lock:
+            avgs = compute_sector_averages(_cache)
+        with _cache_lock:
+            _sector_averages = avgs
+        print(f"On-demand sector avg computation: {len(_sector_averages)} sectors")
     return {"sectors": _sector_averages, "count": len(_sector_averages)}
 
 @app.get("/api/symbols")
@@ -2331,7 +2418,19 @@ def build_portfolio_endpoint(
     if profile_id not in INVESTOR_PROFILES:
         raise HTTPException(400, f"Unknown profile: {profile_id}")
 
-    asset_alloc = compute_asset_allocation(profile_id, capital, nifty_pe)
+    try:
+        asset_alloc = compute_asset_allocation(profile_id, capital, nifty_pe)
+    except Exception as e:
+        print(f"Asset allocation error: {e}")
+        asset_alloc = {
+            "allocation_pct": {"equity": 70, "gold": 10, "debt": 15, "cash": 5},
+            "allocation_amt": {"equity": int(capital*0.7), "gold": int(capital*0.1), "debt": int(capital*0.15), "cash": int(capital*0.05)},
+            "equity_capital": int(capital * 0.7),
+            "nifty_pe": 22.0, "market_valuation": {"zone": "Fair Value", "color": "#2563eb", "description": "Market at historical average."},
+            "logic": "Balanced allocation based on profile philosophy.",
+            "instruments": {"gold": "Sovereign Gold Bond", "debt": "Liquid Fund", "cash": "Savings Account"},
+            "rebalance_triggers": []
+        }
     equity_capital = asset_alloc["equity_capital"]
     profile = INVESTOR_PROFILES[profile_id]
     target_n = limit or profile.get("portfolio_size", 15)
@@ -2354,13 +2453,23 @@ def build_portfolio_endpoint(
     portfolio = get_portfolio_allocation(profile_id, top, equity_capital)
 
     for pos in portfolio["positions"]:
-        stock_data = next((s for s in top if s["symbol"] == pos["symbol"]), {})
-        explanation = generate_stock_explanation(stock_data, profile_id, avgs)
-        pos["full_analysis"] = explanation["full_analysis"]
-        pos["qualifying_metrics"] = explanation["qualifying_metrics"]
-        pos["one_liner"] = explanation["one_liner"]
+        try:
+            stock_data = next((s for s in top if s["symbol"] == pos["symbol"]), {})
+            explanation = generate_stock_explanation(stock_data, profile_id, avgs)
+            pos["full_analysis"] = explanation.get("full_analysis", "")
+            pos["qualifying_metrics"] = explanation.get("qualifying_metrics", [])
+            pos["one_liner"] = explanation.get("one_liner", "")
+        except Exception as e:
+            print(f"Explanation error for {pos.get('symbol')}: {e}")
+            pos["full_analysis"] = f"Selected based on {INVESTOR_PROFILES.get(profile_id, {}).get('name', profile_id)} criteria."
+            pos["qualifying_metrics"] = []
+            pos["one_liner"] = pos.get("why_included", "")
 
-    why_not = generate_why_not(profile_id, near_misses, avgs)
+    try:
+        why_not = generate_why_not(profile_id, near_misses, avgs)
+    except Exception as e:
+        print(f"Why-not error: {e}")
+        why_not = []
 
     portfolio.update({
         "profile_id": profile_id, "profile_name": profile["name"],
