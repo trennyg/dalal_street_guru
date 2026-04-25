@@ -661,7 +661,37 @@ def score_stock(d: dict, sector_avgs: dict) -> dict:
         if val is None: return 0
         avg = avgs.get(avg_key)
         if avg is None or avg == 0:
-            return 50  # neutral if no sector data
+            # No sector data - use absolute thresholds
+            if avg_key == "roe":
+                if val >= 0.25: return 85
+                if val >= 0.18: return 70
+                if val >= 0.12: return 50
+                return 30
+            elif avg_key == "roce":
+                if val >= 0.25: return 85
+                if val >= 0.18: return 70
+                if val >= 0.12: return 50
+                return 30
+            elif avg_key == "opm":
+                if val >= 0.25: return 85
+                if val >= 0.15: return 65
+                if val >= 0.08: return 45
+                return 25
+            elif avg_key == "de":
+                if val < 0.1: return 90
+                if val < 0.3: return 75
+                if val < 0.7: return 50
+                return 25
+            elif avg_key == "pe":
+                if val < 12: return 85
+                if val < 20: return 65
+                if val < 30: return 45
+                return 25
+            elif avg_key == "npm":
+                if val >= 0.15: return 80
+                if val >= 0.08: return 60
+                return 35
+            return 50  # true neutral for unknown metrics
         ratio = val / avg
         if higher_better:
             if ratio >= 2.0: return 100 * weight
@@ -1033,6 +1063,188 @@ INVESTOR_PROFILES = {
         "rebalance_style": "Annual rebalance. Equal weight approach.",
         "description": "Earnings quality, ROE without leverage, Goldman Sachs rigor",
     },
+    "radhakishan_damani": {
+        "name": "Radhakishan Damani", "avatar": "RKD", "category": "Indian Legend",
+        "focus": "Retail & Consumer Value", "color": "#fb923c",
+        "portfolio_size": 8, "sizing_style": "very_concentrated",
+        "bio": "Radhakishan Damani, founder of DMart and Avenue Supermarts, is one of India's wealthiest individuals. Before DMart he was a legendary investor known for contrarian calls and deep value in the 1990s.",
+        "philosophy": "Extremely concentrated bets on businesses he deeply understands. Prefers consumer-facing businesses with pricing power, everyday essential products, and low-cost operational models.",
+        "what_he_looked_for": "Consumer businesses with durable competitive advantage, low-cost operators, essential products, strong cash flow, owner-operated businesses.",
+        "what_he_avoided": "Capital-intensive businesses, high debt, businesses dependent on advertising, luxury goods.",
+        "famous_investments": ["Avenue Supermarts (DMart)", "VST Industries", "3M India", "United Breweries"],
+        "signature_quote": "Build a business where customers come back every day.",
+        "rebalance_style": "Very long term. Once invested, rarely exits.",
+        "description": "Consumer + retail lens, EDLP businesses, essential products, low debt",
+    },
+    "raamdeo_agrawal": {
+        "name": "Raamdeo Agrawal", "avatar": "RA", "category": "Indian Legend",
+        "focus": "QGLP — Quality Growth", "color": "#60a5fa",
+        "portfolio_size": 20, "sizing_style": "conviction_weighted",
+        "bio": "Raamdeo Agrawal, co-founder of Motilal Oswal Financial Services, developed the QGLP framework that has guided billions in Indian equity investment. He has compounded wealth at over 25% CAGR for over 30 years.",
+        "philosophy": "QGLP: Quality of business and management, Growth in earnings over 20% for 5 years, Longevity of the growth runway 10+ years, Price that is reasonable (PEG below 1.5). All four must align.",
+        "what_he_looked_for": "ROE above 20%, earnings growth above 20% for 5 years, large addressable market, honest management, PE reasonable relative to growth.",
+        "what_he_avoided": "Commodity businesses, high debt, management with integrity issues, businesses with less than 5 year earnings visibility.",
+        "famous_investments": ["Eicher Motors", "Page Industries", "HDFC Bank", "Infosys"],
+        "signature_quote": "Wealth creation is all about owning great businesses for a long period of time.",
+        "rebalance_style": "Annual formal review. Replaces slowest growers.",
+        "description": "QGLP pioneer — Quality + Growth + Longevity + Price framework",
+    },
+    "sanjay_bakshi": {
+        "name": "Sanjay Bakshi", "avatar": "SB", "category": "Indian Legend",
+        "focus": "Behavioral Value Investing", "color": "#818cf8",
+        "portfolio_size": 15, "sizing_style": "conviction_weighted",
+        "bio": "Sanjay Bakshi is a professor at MDI Gurgaon and founder of ValueQuest Capital. A disciple of Ben Graham and Charlie Munger, he brings academic rigor to value investing.",
+        "philosophy": "Combines Graham margin of safety with Munger quality-compounder approach. Heavy emphasis on behavioral finance — buy when others are irrationally fearful. Focuses on moaty businesses at temporary discounts.",
+        "what_he_looked_for": "High-quality businesses at temporary discount, monopolistic characteristics, owner-operators, high ROCE, low debt.",
+        "what_he_avoided": "Businesses he does not deeply understand, highly leveraged companies, businesses without durable competitive advantage.",
+        "famous_investments": ["Relaxo Footwear", "Hawkins Cookers", "La Opala", "Astral Poly"],
+        "signature_quote": "The best time to buy a great business is when it is being given away.",
+        "rebalance_style": "Thesis-based. Patient 3-7 year holds.",
+        "description": "Academic value investing, behavioral finance lens, moaty businesses at discount",
+    },
+    "kenneth_andrade": {
+        "name": "Kenneth Andrade (Old Bridge)", "avatar": "KA", "category": "Indian Legend",
+        "focus": "Asset-Light Capital Efficiency", "color": "#34d399",
+        "portfolio_size": 20, "sizing_style": "equal_weight",
+        "bio": "Kenneth Andrade, founder of Old Bridge Capital, is known for his contrarian asset-light investment philosophy. He ran IDFC Premier Equity Fund before starting Old Bridge, delivering exceptional returns.",
+        "philosophy": "Focus on asset-light businesses with high capital efficiency. Look for companies where earnings growth does not require proportional capital investment. Contrarian — buys underperforming sectors.",
+        "what_he_looked_for": "Asset-light models, high asset turnover, capital-efficient businesses, sectors at cyclical lows, ROCE improvement trend.",
+        "what_he_avoided": "Capital-intensive manufacturing, businesses requiring constant capex, highly leveraged balance sheets.",
+        "famous_investments": ["PI Industries", "Sudarshan Chemicals", "Aavas Financiers", "Cera Sanitaryware"],
+        "signature_quote": "Asset-light businesses are the future of wealth creation.",
+        "rebalance_style": "Semi-annual. Rotates out of fully valued into undervalued sectors.",
+        "description": "Asset-light businesses, high capital efficiency, ROCE focus, contrarian rotation",
+    },
+    "chandrakant_sampat": {
+        "name": "Chandrakant Sampat", "avatar": "CS", "category": "Indian Legend",
+        "focus": "Original Indian Value", "color": "#a78bfa",
+        "portfolio_size": 10, "sizing_style": "conviction_weighted",
+        "bio": "Chandrakant Sampat (1928-2015) is considered India's original value investor, predating Buffett's fame in India. He invested in Hindustan Unilever and similar consumer monopolies decades before it became fashionable.",
+        "philosophy": "Invest in businesses that sell essential products that people need regardless of economic cycles. Debt-free companies with strong brands and pricing power that compound quietly over decades.",
+        "what_he_looked_for": "Debt-free balance sheets, consumer monopolies, strong brand moats, consistent dividend payers, businesses with 20+ year runway.",
+        "what_he_avoided": "Leveraged businesses, commodity companies, businesses dependent on government contracts, cyclical industries.",
+        "famous_investments": ["Hindustan Unilever (held 40+ years)", "Colgate-Palmolive", "Nestle India", "Infosys (early)"],
+        "signature_quote": "Invest in a business that even a fool can run, because someday a fool will.",
+        "rebalance_style": "Decades-long holds. Portfolio turnover near zero.",
+        "description": "India original Buffett — consumer monopolies, debt-free, decades-long compounders",
+    },
+    "nippon_smallcap": {
+        "name": "Nippon India Small Cap", "avatar": "NS", "category": "Indian Fund",
+        "focus": "High Growth Small Caps", "color": "#22d3ee",
+        "portfolio_size": 60, "sizing_style": "equal_weight",
+        "bio": "Nippon India Small Cap Fund is one of India's largest small cap funds with over Rs 50,000 Cr AUM. It invests across the small cap spectrum with focus on growth businesses in emerging sectors.",
+        "philosophy": "Diversified exposure to India's small cap growth story. Find emerging sector leaders before they become mainstream. Willing to pay higher multiples for high growth businesses.",
+        "what_he_looked_for": "Small cap companies (market cap Rs 500-8000 Cr), high revenue growth above 20%, improving profitability, sector leadership potential.",
+        "what_he_avoided": "Companies with too much debt, loss-making without clear path to profitability, businesses in permanently declining industries.",
+        "famous_investments": ["Tube Investments", "Navin Fluorine", "Happiest Minds", "KPIT Technologies"],
+        "signature_quote": "Small caps today are large caps tomorrow.",
+        "rebalance_style": "Quarterly review.",
+        "description": "Diversified small cap growth, emerging sector leaders, high growth businesses",
+    },
+    "nemish_shah": {
+        "name": "Nemish Shah (Enam)", "avatar": "NSH", "category": "Indian Fund",
+        "focus": "Consumer & Pharma Quality", "color": "#e879f9",
+        "portfolio_size": 15, "sizing_style": "conviction_weighted",
+        "bio": "Nemish Shah co-founded Enam Securities with Vallabh Bhansali. Known for deep expertise in consumer and pharmaceutical businesses. His thesis centres on businesses selling essential products with strong brand moats.",
+        "philosophy": "Focus on consumer staples and pharma — businesses people need regardless of the economy. Brands with pricing power, high repeat purchase, and strong distribution networks compound quietly for decades.",
+        "what_he_looked_for": "Consumer brands with pricing power, pharmaceutical businesses with strong pipelines, debt-free balance sheets, consistent dividend payers.",
+        "what_he_avoided": "Capital-intensive businesses without brand moat, high debt, management with integrity concerns.",
+        "famous_investments": ["Hindustan Unilever", "Nestle India", "Abbott India", "Colgate-Palmolive"],
+        "signature_quote": "Consumer brands are the closest thing to a perpetual motion machine in business.",
+        "rebalance_style": "Very long term holds. Decades in some cases.",
+        "description": "Consumer and pharma specialist, brand moats, pricing power, debt-free",
+    },
+    "mirae_asset": {
+        "name": "Mirae Asset India", "avatar": "MA", "category": "Indian Fund",
+        "focus": "Quality Growth Large Cap", "color": "#a3e635",
+        "portfolio_size": 55, "sizing_style": "market_cap_weighted",
+        "bio": "Mirae Asset Investment Managers India is the Indian arm of South Korean giant Mirae Asset. Known for disciplined process-driven investing, Mirae India Equity has consistently outperformed its benchmark.",
+        "philosophy": "Bottom-up stock selection focusing on quality businesses with sustainable competitive advantages. Sector leaders with consistent earnings growth and strong return ratios.",
+        "what_he_looked_for": "Sector leadership, consistent earnings growth, strong ROE and ROCE, reasonable valuations, well-managed balance sheets.",
+        "what_he_avoided": "Speculative businesses, high leverage, businesses without clear competitive advantage.",
+        "famous_investments": ["ICICI Bank", "Infosys", "Maruti Suzuki", "Bharti Airtel", "Kotak Mahindra"],
+        "signature_quote": "Quality businesses at reasonable prices outperform over time.",
+        "rebalance_style": "Quarterly review. Benchmark-aware.",
+        "description": "Sector leaders, quality businesses, consistent earnings growth, risk management",
+    },
+    "hdfc_mf": {
+        "name": "HDFC Mutual Fund", "avatar": "HM", "category": "Indian Fund",
+        "focus": "Value + Quality Blend", "color": "#fb923c",
+        "portfolio_size": 50, "sizing_style": "conviction_weighted",
+        "bio": "Under Prashant Jain (2003-2022), HDFC Equity Fund became one of India's most respected equity funds. Known for contrarian calls — buying PSU banks and infrastructure when others avoided them.",
+        "philosophy": "Buy quality businesses at value prices. Be contrarian — PSU banks, infrastructure, and cyclicals have their time. Patient capital. Hold through 3-5 year down cycles if the long-term thesis is intact.",
+        "what_he_looked_for": "Quality businesses at value multiples, PSU and cyclical businesses at trough valuations, consistent dividend payers.",
+        "what_he_avoided": "Businesses at extreme valuations, highly leveraged companies, businesses without earnings visibility.",
+        "famous_investments": ["SBI", "HDFC Bank", "Infosys", "BHEL (contrarian)", "ONGC"],
+        "signature_quote": "Be contrarian. Buy when others are selling.",
+        "rebalance_style": "Patient 3-5 year holds. Contrarian rebalancing.",
+        "description": "Value + quality blend, contrarian at times, patient long-term capital",
+    },
+    "anand_rathi": {
+        "name": "Anand Rathi Wealth", "avatar": "AR", "category": "Indian Fund",
+        "focus": "Wealth Preservation + Growth", "color": "#fbbf24",
+        "portfolio_size": 25, "sizing_style": "risk_weighted",
+        "bio": "Anand Rathi Wealth is one of India's leading wealth management firms focused on HNI clients. Their approach prioritizes capital preservation alongside growth, with heavy emphasis on asset allocation.",
+        "philosophy": "Wealth preservation first, growth second. Large cap bias for stability. Dividend-paying businesses for income. Portfolio construction with risk management as a central theme.",
+        "what_he_looked_for": "Large cap stability (market cap above Rs 10,000 Cr), consistent dividend payers, low debt, strong corporate governance, defensive sectors.",
+        "what_he_avoided": "Highly speculative smallcaps, businesses with governance issues, high leverage.",
+        "famous_investments": ["HDFC Bank", "Infosys", "Reliance", "ITC", "Bajaj Finance"],
+        "signature_quote": "Preserving wealth is as important as creating it.",
+        "rebalance_style": "Semi-annual with asset allocation review.",
+        "description": "HNI wealth management, large cap bias, capital preservation, dividend focus",
+    },
+    "ask_investment": {
+        "name": "ASK Investment Managers", "avatar": "ASK", "category": "Indian Fund",
+        "focus": "Quality Large Cap PMS", "color": "#fdba74",
+        "portfolio_size": 20, "sizing_style": "conviction_weighted",
+        "bio": "ASK Investment Managers is one of India's largest PMS providers with over Rs 70,000 Cr in AUM. Known for quality-focused approach and wealth preservation philosophy for HNI clients.",
+        "philosophy": "Capital preservation with growth. Focus on large quality businesses with strong balance sheets. Dividend-paying companies for income. Low churn, patient approach.",
+        "what_he_looked_for": "Large cap quality (above Rs 10,000 Cr market cap), consistent earnings growth, strong ROE, low debt, dividend payers, strong corporate governance.",
+        "what_he_avoided": "Small caps, businesses with governance concerns, high leverage, loss-making businesses.",
+        "famous_investments": ["HDFC Bank", "Bajaj Finance", "Asian Paints", "Infosys", "Kotak Bank"],
+        "signature_quote": "Quality never goes out of style.",
+        "rebalance_style": "Annual. Low turnover wealth management approach.",
+        "description": "Quality large cap PMS, wealth preservation, consistent earnings, low leverage",
+    },
+    "murugappa": {
+        "name": "Murugappa Group Style", "avatar": "MG", "category": "Indian Fund",
+        "focus": "South India Industrial Quality", "color": "#fcd34d",
+        "portfolio_size": 15, "sizing_style": "equal_weight",
+        "bio": "The Murugappa Group is a 125-year-old Chennai-based conglomerate. Their investment philosophy reflects generations of industrial wealth creation — patient, conservative, quality-focused.",
+        "philosophy": "Long-term industrial value creation. Manufacturing excellence, operational efficiency, conservative balance sheets. Family-run businesses with multi-generational thinking.",
+        "what_he_looked_for": "Manufacturing excellence, operational efficiency, conservative balance sheets, consistent dividend history, family-managed businesses with long track records.",
+        "what_he_avoided": "Speculative businesses, high leverage, businesses requiring constant external capital.",
+        "famous_investments": ["Coromandel International", "Carborundum Universal", "Cholamandalam Investment", "EID Parry"],
+        "signature_quote": "Build businesses that last generations.",
+        "rebalance_style": "Very long term. Generational investment horizon.",
+        "description": "Industrial manufacturing, conservative balance sheets, multi-generational quality",
+    },
+    "manish_kejriwal": {
+        "name": "Manish Kejriwal (Amansa)", "avatar": "MK", "category": "Indian Legend",
+        "focus": "Quality Growth PE Style", "color": "#f0abfc",
+        "portfolio_size": 15, "sizing_style": "conviction_weighted",
+        "bio": "Manish Kejriwal founded Amansa Capital after stints at Goldman Sachs and Temasek. He brings a private equity mindset to public market investing — long holding periods, deep business analysis.",
+        "philosophy": "Invest like a PE fund in public markets. Buy stakes in high-quality businesses with long growth runways and hold for 5-10 years. Management quality and corporate governance are paramount.",
+        "what_he_looked_for": "World-class management, high ROE above 20%, durable competitive moat, large addressable market, strong corporate governance.",
+        "what_he_avoided": "Businesses with governance concerns, high leverage, highly competitive commoditized industries.",
+        "famous_investments": ["Info Edge (Naukri)", "HDFC Life", "Asian Paints", "Pidilite Industries"],
+        "signature_quote": "We invest in businesses, not stocks.",
+        "rebalance_style": "Long-term 5-10 year holds. Very low portfolio turnover.",
+        "description": "Private equity mindset, world-class management, 5-10 year holds",
+    },
+    "phil_fisher": {
+        "name": "Philip Fisher", "avatar": "PF", "category": "Global Legend",
+        "focus": "Scuttlebutt Growth Investor", "color": "#14b8a6",
+        "portfolio_size": 12, "sizing_style": "conviction_weighted",
+        "bio": "Philip Fisher wrote Common Stocks and Uncommon Profits (1958), one of the most influential investment books. His scuttlebutt method — researching companies through industry contacts — was revolutionary.",
+        "philosophy": "Buy outstanding companies with superior long-term growth prospects and hold them for years. Use the scuttlebutt method to deeply understand the business. Management quality is paramount.",
+        "what_he_looked_for": "Strong sales growth, high profit margins, R&D investment, excellent management, good labor relations, proprietary products.",
+        "what_he_avoided": "Businesses solely focused on price competition, poor management teams, businesses without R&D investment.",
+        "famous_investments": ["Motorola (held for decades)", "Texas Instruments", "Dow Chemical"],
+        "signature_quote": "The stock market is filled with individuals who know the price of everything, but the value of nothing.",
+        "rebalance_style": "Long-term growth holds. Exits when growth thesis breaks.",
+        "description": "Outstanding growth companies, deep research, management quality paramount",
+    },
     "carnelian": {
         "name": "Carnelian Asset (Vikas Khemani)", "avatar": "CA", "category": "Indian Fund",
         "focus": "Emerging Sector Leaders", "color": "#67e8f9",
@@ -1230,6 +1442,126 @@ def score_profile(d: dict, profile: str, sector_avgs: dict = None) -> dict:
         sv2 = vs(opm, "opm", True)
         s += (sv2 or (15 if opm and pct(opm) >= 15 else 5))
         if earn_growth and pct(earn_growth) >= 20: s += 15; r.append(f"Fast growing {pct(earn_growth):.1f}%")
+
+    elif profile == "radhakishan_damani":
+        if opm and pct(opm) >= 15: s += 30; r.append(f"Consumer pricing power {pct(opm):.1f}%")
+        if debt_free: s += 25; r.append("Debt-free consumer business")
+        if dy and dy >= 0.02: s += 20; r.append(f"Cash return {pct(dy):.1f}%")
+        if roe and pct(roe) >= 18: s += 15; r.append(f"Strong ROE {pct(roe):.1f}%")
+        if mc > 5000: s += 10
+
+    elif profile == "raamdeo_agrawal":
+        q_met = (roe and pct(roe) >= 20) and (opm and pct(opm) >= 15)
+        g_met = (rev_growth and pct(rev_growth) >= 15) or (earn_growth and pct(earn_growth) >= 15)
+        p_met = pe and 0 < pe < 45
+        l_met = ph and ph >= 0.40
+        if q_met: s += 30; r.append("Quality criterion met (ROE + margins)")
+        if g_met: s += 25; r.append("Growth criterion met")
+        if p_met: s += 25; r.append(f"Price reasonable P/E {pe:.1f}x")
+        if l_met: s += 20; r.append(f"Longevity promoter {pct(ph):.1f}%")
+
+    elif profile == "sanjay_bakshi":
+        if roe and pct(roe) >= 20: s += 25; r.append(f"Quality moat ROE {pct(roe):.1f}%")
+        elif roe and pct(roe) >= 15: s += 15
+        if debt_free or (de is not None and de < 0.3): s += 25; r.append("Graham safety margin")
+        pct_off = ((high-price)/high*100) if price and high and high > 0 else 0
+        if pct_off >= 20: s += 25; r.append(f"Behavioral mispricing {pct_off:.0f}% off highs")
+        if opm and pct(opm) >= 20: s += 15; r.append(f"Wide margins {pct(opm):.1f}%")
+        if pe and 0 < pe < 35: s += 10
+
+    elif profile == "kenneth_andrade":
+        if roce and pct(roce) >= 20: s += 30; r.append(f"Capital efficient ROCE {pct(roce):.1f}%")
+        elif roce and pct(roce) >= 15: s += 18
+        if opm and pct(opm) >= 15: s += 25; r.append(f"Asset-light margins {pct(opm):.1f}%")
+        if de is not None and de < 0.3: s += 20; r.append("Low capex balance sheet")
+        pct_off2 = ((high-price)/high*100) if price and high and high > 0 else 0
+        if pct_off2 >= 15: s += 15; r.append(f"Contrarian entry {pct_off2:.0f}% off highs")
+
+    elif profile == "chandrakant_sampat":
+        if debt_free: s += 30; r.append("Debt-free — Sampat non-negotiable")
+        if roe and pct(roe) >= 20: s += 25; r.append(f"High ROE {pct(roe):.1f}%")
+        elif roe and pct(roe) >= 15: s += 15
+        if opm and pct(opm) >= 20: s += 25; r.append(f"Consumer pricing power {pct(opm):.1f}%")
+        elif opm and pct(opm) >= 12: s += 12
+        if pe and 0 < pe < 35: s += 20
+
+    elif profile == "nippon_smallcap":
+        if 0 < mc < 8000: s += 30; r.append(f"Small cap Rs {mc:.0f}Cr")
+        elif mc < 15000: s += 15
+        if roe and pct(roe) >= 18: s += 25; r.append(f"High growth ROE {pct(roe):.1f}%")
+        elif roe and pct(roe) >= 12: s += 15
+        if opm and pct(opm) >= 15: s += 25; r.append(f"Emerging margins {pct(opm):.1f}%")
+        elif opm and pct(opm) >= 8: s += 12
+        if pe and 0 < pe < 50: s += 20
+
+    elif profile == "nemish_shah":
+        if debt_free: s += 30; r.append("Debt-free consumer/pharma")
+        if opm and pct(opm) >= 20: s += 25; r.append(f"Pricing power OPM {pct(opm):.1f}%")
+        elif opm and pct(opm) >= 12: s += 15
+        if roe and pct(roe) >= 18: s += 20; r.append(f"Consistent ROE {pct(roe):.1f}%")
+        if ph and ph >= 0.40: s += 15; r.append(f"Promoter alignment {pct(ph):.1f}%")
+        if dy and dy >= 0.015: s += 10; r.append(f"Dividend {pct(dy):.1f}%")
+
+    elif profile == "mirae_asset":
+        if roe and pct(roe) >= 20: s += 28; r.append(f"Quality ROE {pct(roe):.1f}%")
+        elif roe and pct(roe) >= 15: s += 18
+        if roce and pct(roce) >= 20: s += 22; r.append(f"Strong ROCE {pct(roce):.1f}%")
+        elif roce and pct(roce) >= 12: s += 12
+        if opm and pct(opm) >= 18: s += 25; r.append(f"Sector leader margins {pct(opm):.1f}%")
+        elif opm and pct(opm) >= 12: s += 15
+        if pe and 0 < pe < 40: s += 25
+
+    elif profile == "hdfc_mf":
+        pct_off3 = ((high-price)/high*100) if price and high and high > 0 else 0
+        if pct_off3 >= 20: s += 20; r.append(f"Value opportunity {pct_off3:.0f}% off highs")
+        if pe and 0 < pe < 20: s += 25; r.append(f"Value P/E {pe:.1f}x")
+        elif pe and pe < 30: s += 15
+        if roe and pct(roe) >= 15: s += 25; r.append(f"Quality ROE {pct(roe):.1f}%")
+        elif roe and pct(roe) >= 10: s += 15
+        if dy and dy >= 0.02: s += 15; r.append(f"Dividend support {pct(dy):.1f}%")
+        if debt_free or (de is not None and de < 0.5): s += 15
+
+    elif profile == "anand_rathi":
+        if mc > 10000: s += 20; r.append(f"Large cap safety Rs {mc:.0f}Cr")
+        if dy and dy >= 0.03: s += 30; r.append(f"Strong dividend {pct(dy):.1f}%")
+        elif dy and dy >= 0.02: s += 18; r.append(f"Good dividend {pct(dy):.1f}%")
+        elif dy and dy >= 0.01: s += 8
+        if debt_free or (de is not None and de < 0.3): s += 25; r.append("Capital preservation")
+        if roe and pct(roe) >= 15: s += 15
+        if pe and 0 < pe < 25: s += 10
+
+    elif profile == "ask_investment":
+        if mc > 15000: s += 20; r.append(f"Institutional quality Rs {mc:.0f}Cr")
+        if roe and pct(roe) >= 18: s += 25; r.append(f"Quality ROE {pct(roe):.1f}%")
+        elif roe and pct(roe) >= 12: s += 15
+        if debt_free or (de is not None and de < 0.3): s += 25; r.append("Conservative balance sheet")
+        if dy and dy >= 0.015: s += 15; r.append(f"Dividend {pct(dy):.1f}%")
+        if opm and pct(opm) >= 15: s += 15
+
+    elif profile == "murugappa":
+        if debt_free or (de is not None and de < 0.3): s += 30; r.append("Conservative balance sheet")
+        if dy and dy >= 0.02: s += 25; r.append(f"Dividend history {pct(dy):.1f}%")
+        elif dy and dy >= 0.01: s += 15
+        if opm and pct(opm) >= 15: s += 25; r.append(f"Manufacturing margins {pct(opm):.1f}%")
+        elif opm and pct(opm) >= 10: s += 15
+        if roe and pct(roe) >= 15: s += 20
+
+    elif profile == "manish_kejriwal":
+        if roe and pct(roe) >= 22: s += 30; r.append(f"PE-quality ROE {pct(roe):.1f}%")
+        elif roe and pct(roe) >= 15: s += 18
+        if opm and pct(opm) >= 20: s += 25; r.append(f"Quality margins {pct(opm):.1f}%")
+        elif opm and pct(opm) >= 12: s += 15
+        if ph and ph >= 0.45: s += 25; r.append(f"Management alignment {pct(ph):.1f}%")
+        if debt_free or (de is not None and de < 0.4): s += 20
+
+    elif profile == "phil_fisher":
+        if roe and pct(roe) >= 20: s += 30; r.append(f"Superior ROE {pct(roe):.1f}%")
+        elif roe and pct(roe) >= 15: s += 18
+        if opm and pct(opm) >= 20: s += 25; r.append(f"Growing margins {pct(opm):.1f}%")
+        elif opm and pct(opm) >= 12: s += 15
+        if ph and ph >= 0.40: s += 25; r.append(f"Management aligned {pct(ph):.1f}%")
+        if pe and 0 < pe < 50: s += 20
+        if rev_growth and pct(rev_growth) >= 15: s += 0; r.append(f"Sales growth {pct(rev_growth):.1f}%")
 
     return {"score": min(s, 100), "reasons": r[:3]}
 
@@ -1784,17 +2116,25 @@ def refresh_cache():
 
 @app.on_event("startup")
 async def startup():
+    global _sector_averages
     loaded = load_cache()
     if loaded:
         age_h = (datetime.now() - _cache_time).total_seconds() / 3600
-        # Force rebuild if cache is older than 6h OR if data_source is not merged
+        # Always recompute sector averages from loaded cache
+        if not _sector_averages:
+            with _cache_lock:
+                avgs = compute_sector_averages(_cache)
+            with _cache_lock:
+                _sector_averages = avgs
+            print(f"Computed sector averages: {len(_sector_averages)} sectors")
+        # Rebuild if stale or missing merged data
         sample = list(_cache.values())[:5] if _cache else []
-        needs_rebuild = age_h > 6 or any(s.get("data_source") not in ("merged","yfinance") for s in sample)
+        needs_rebuild = age_h > 8 or any(s.get("data_source") not in ("merged","yfinance") for s in sample)
         if needs_rebuild:
-            print(f"Cache needs rebuild (age={age_h:.1f}h, sources={set(s.get('data_source') for s in sample)})")
+            print(f"Cache rebuild needed (age={age_h:.1f}h)")
             threading.Thread(target=refresh_cache, daemon=True).start()
         else:
-            print(f"Cache fresh ({age_h:.1f}h old, merged data)")
+            print(f"Cache fresh ({age_h:.1f}h, {len(_sector_averages)} sectors indexed)")
     else:
         threading.Thread(target=refresh_cache, daemon=True).start()
 
