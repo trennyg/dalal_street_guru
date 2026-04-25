@@ -994,7 +994,7 @@ function PortfolioOutput({ portfolio, portfolioProfile, portfolioMode, onLearnCl
               <Pie data={sectorData.slice(0,8)} cx="50%" cy="50%" innerRadius={48} outerRadius={78} dataKey="value" paddingAngle={2}>
                 {sectorData.slice(0,8).map((e,i)=><Cell key={i} fill={e.color}/>)}
               </Pie>
-              <Tooltip formatter={v=>[`${v}%`,"Sector"]} contentStyle={{fontSize:12,borderRadius:8}}/>
+              <Tooltip formatter={(v, name, props)=>[`${props.payload.name}: ${v}%`]} contentStyle={{fontSize:12,borderRadius:8}}/>
               <Legend iconType="circle" iconSize={7} formatter={v=><span style={{fontSize:9,color:"var(--text2)"}}>{v.length>14?v.slice(0,14)+"…":v}</span>}/>
             </PieChart>
           </ResponsiveContainer>

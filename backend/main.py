@@ -570,13 +570,26 @@ def fetch_screener_fallback(symbol: str) -> dict:
             pe = get("Stock P/E","P/E")
             book_value = get("Book Value")
             pb = round(current_price/book_value,2) if current_price and book_value and book_value > 0 else None
-            roe_raw = get("ROE"); roe = (roe_raw/100) if roe_raw else None
-            roce_raw = get("ROCE"); roce = (roce_raw/100) if roce_raw else None
-            de = get("Debt to equity","D/E")
-            opm_raw = get("OPM"); opm = (opm_raw/100) if opm_raw else None
+            roe_raw = get("ROE","Return on equity"); roe = (roe_raw/100) if roe_raw else None
+            roce_raw = get("ROCE","Return on capital employed"); roce = (roce_raw/100) if roce_raw else None
+            de = get("Debt to equity","Debt / Equity","D/E")
+            opm_raw = get("OPM","Operating Profit Margin"); opm = (opm_raw/100) if opm_raw else None
+            npm_raw = get("Net profit margin","NPM","Net Profit %"); npm = (npm_raw/100) if npm_raw else None
             dy_raw = get("Dividend Yield"); dy = (dy_raw/100) if dy_raw else None
-            ph_raw = get("Promoter holding"); ph = (ph_raw/100) if ph_raw else None
-            eps = get("EPS")
+            ph_raw = get("Promoter holding","Promoter Holding"); ph = (ph_raw/100) if ph_raw else None
+            eps = get("EPS","Earnings per share")
+            cr = get("Current ratio","Current Ratio")
+            # EV/EBITDA from screener
+            ev_ebitda = get("EV / EBITDA","EV/EBITDA","Enterprise Value/EBITDA")
+            # Revenue and profit for EBITDA calc
+            revenue_raw = get("Sales","Revenue","Total Revenue")
+            revenue = revenue_raw * 1e7 if revenue_raw else None
+            # Compute EBITDA from OPM * Revenue if not directly available  
+            ebitda = None
+            if revenue and opm: ebitda = revenue * opm
+            # EV/EBITDA fallback
+            if not ev_ebitda and mc_cr and ebitda and ebitda > 0:
+                ev_ebitda = round((mc_cr * 1e7) / ebitda, 1)
 
             hl = all_kv.get("High / Low","")
             w52h = w52l = None
@@ -604,14 +617,14 @@ def fetch_screener_fallback(symbol: str) -> dict:
                 "current_price": current_price, "price_change_pct": None,
                 "market_cap": mc_cr * 1e7 if mc_cr else None,
                 "52w_high": w52h, "52w_low": w52l, "avg_volume": None,
-                "pe_ratio": pe, "pb_ratio": pb, "ev_ebitda": None, "ev_revenue": None,
+                "pe_ratio": pe, "pb_ratio": pb, "ev_ebitda": ev_ebitda, "ev_revenue": None,
                 "peg_ratio": None, "book_value": book_value,
                 "roe": roe, "roa": None, "roce": roce, "debt_to_equity": de,
-                "operating_margins": opm, "net_margins": None,
+                "operating_margins": opm, "net_margins": npm,
                 "revenue_growth": None, "earnings_growth": None,
-                "current_ratio": None, "quick_ratio": None, "interest_coverage": None,
+                "current_ratio": cr, "quick_ratio": None, "interest_coverage": None,
                 "dividend_yield": dy, "eps": eps, "beta": None, "fcf": None,
-                "revenue": None, "ebitda": None,
+                "revenue": revenue, "ebitda": ebitda,
                 "promoter_holding": ph, "institutional_holding": None,
                 "analyst_recommendation": None, "target_price": None, "num_analysts": None,
                 "quarterly_revenue": [], "quarterly_profit": [],
@@ -2250,7 +2263,7 @@ async def startup():
         print(f"Computed sector averages: {len(_sector_averages)} sectors")
         # Rebuild if stale or missing merged data
         sample = list(_cache.values())[:5] if _cache else []
-        needs_rebuild = age_h > 8 or any(s.get("data_source") not in ("merged","yfinance") for s in sample)
+        needs_rebuild = age_h > 4 or any(s.get("net_margins") is None and s.get("current_ratio") is None for s in sample[:10])
         if needs_rebuild:
             print(f"Cache rebuild needed (age={age_h:.1f}h)")
             threading.Thread(target=refresh_cache, daemon=True).start()
