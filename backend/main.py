@@ -1919,6 +1919,22 @@ def generate_why_not(profile_id: str, near_misses: list, sector_avgs: dict) -> l
     return results
 
 
+
+def normalize_scoring(scoring: dict) -> dict:
+    """Ensure scoring has both old and new format fields."""
+    if not scoring: return scoring
+    # If it has old sub_scores format (Buffett/RJ/Quality/Value), convert to new
+    sub = scoring.get("sub_scores", [])
+    if sub and isinstance(sub[0], dict):
+        labels = [s.get("label","") for s in sub]
+        if "Buffett" in labels:
+            # Old format - rebuild from scores dict if available
+            scores = scoring.get("scores", {})
+            if scores:
+                scoring = dict(scoring)
+                scoring["sub_scores"] = [{"label": k.capitalize(), "score": v} for k,v in scores.items()]
+    return scoring
+
 def build_entry(symbol, raw, sector_avgs=None):
     if sector_avgs is None: sector_avgs = {}
     # Ensure sector is set correctly
@@ -2324,11 +2340,26 @@ def get_symbols():
 def get_stock(symbol: str):
     symbol = symbol.upper().strip()
     with _cache_lock:
-        if symbol in _cache: return _cache[symbol]
+        cached = _cache.get(symbol)
+    with _cache_lock:
+        avgs = dict(_sector_averages)
+    
+    if cached:
+        # Always recompute sector_comparison with latest sector avgs
+        sector = cached.get("sector", "Unknown")
+        if sector == "Unknown" and symbol in NSE_SECTOR_MAP:
+            sector = NSE_SECTOR_MAP[symbol]
+            cached = dict(cached)
+            cached["sector"] = sector
+        sc = get_sector_comparison(cached, avgs)
+        if sc:  # Only update if we got data
+            cached = dict(cached)
+            cached["sector_comparison"] = sc
+        return cached
+    
     raw = fetch_stock_data(symbol)
     if not raw or not raw.get("current_price"):
         raise HTTPException(404, f"Could not find {symbol}")
-    with _cache_lock: avgs = dict(_sector_averages)
     entry = build_entry(symbol, raw, avgs)
     with _cache_lock: _cache[symbol] = entry
     return entry

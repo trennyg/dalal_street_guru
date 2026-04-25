@@ -237,19 +237,28 @@ export default function StockDetail({ stock, onClose }) {
                   <div style={{ fontSize: 10, color: "var(--blue)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.8, fontFamily: "var(--font-mono)", marginBottom: 14 }}>
                     Score Breakdown
                   </div>
-                  {(stock.scoring.sub_scores || Object.entries(stock.scoring.scores || {}).map(([k,v])=>({label:k,score:v}))).map((s) => {
-                    const label = s.label || s.key; const val = s.score ?? s.value ?? 0;
-                    return (
-                    <div key={label} style={{ marginBottom: 10 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                        <span style={{ fontSize: 12.5, color: "var(--text2)", fontWeight: 500, textTransform: "capitalize" }}>{label}</span>
-                        <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", fontWeight: 700, color: SCORE_COLOR(val) }}>{val}/100</span>
-                      </div>
-                      <div style={{ height: 5, background: "var(--surface3)", borderRadius: 3 }}>
-                        <div style={{ height: "100%", width: `${val}%`, background: SCORE_COLOR(val), borderRadius: 3, transition: "width 0.5s ease" }} />
-                      </div>
-                    </div>
-                  );})}
+                  {(() => {
+                    const sub = stock.scoring.sub_scores;
+                    const scores = stock.scoring.scores || {};
+                    // Use sub_scores if available, else build from scores dict
+                    const items = sub && sub.length > 0 ? sub
+                      : Object.entries(scores).map(([k,v]) => ({label: k.charAt(0).toUpperCase()+k.slice(1).replace(/_/g," "), score: v}));
+                    return items.map(s => {
+                      const label = s.label || s.key || ""; 
+                      const val = s.score ?? s.value ?? 0;
+                      return (
+                        <div key={label} style={{ marginBottom: 10 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                            <span style={{ fontSize: 12.5, color: "var(--text2)", fontWeight: 500 }}>{label}</span>
+                            <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", fontWeight: 700, color: SCORE_COLOR(val) }}>{val}/100</span>
+                          </div>
+                          <div style={{ height: 5, background: "var(--surface3)", borderRadius: 3 }}>
+                            <div style={{ height: "100%", width: `${val}%`, background: SCORE_COLOR(val), borderRadius: 3, transition: "width 0.5s ease" }} />
+                          </div>
+                        </div>
+                      );
+                    });
+                  })()}
                 </div>
 
                 {/* Analyst */}
