@@ -1,2193 +1,1178 @@
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, List
 from datetime import datetime
-import threading
-import time
-import json
-import os
-import re
-import requests
+import threading, time, json, os, re, requests
 from bs4 import BeautifulSoup
-import yfinance as yf
 
-app = FastAPI(title="stocks.ai API", version="12.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
-
-# ─── Nifty PE ─────────────────────────────────────────────────────────────────
-_nifty_pe_cache = {"pe": None, "fetched_at": None}
-
-def fetch_nifty_pe() -> float:
-    """Fetch current Nifty 50 P/E ratio."""
-    global _nifty_pe_cache
-    if _nifty_pe_cache["pe"] and _nifty_pe_cache["fetched_at"]:
-        age_h = (datetime.now() - _nifty_pe_cache["fetched_at"]).total_seconds() / 3600
-        if age_h < 4:
-            return _nifty_pe_cache["pe"]
-    # Try multiple sources
-    # Source 1: yfinance ^NSEI
-    try:
-        ticker = yf.Ticker("^NSEI")
-        info = ticker.info
-        pe = info.get("trailingPE") or info.get("forwardPE")
-        if pe and isinstance(pe, (int, float)) and 8 < pe < 60:
-            _nifty_pe_cache = {"pe": round(float(pe), 1), "fetched_at": datetime.now()}
-            return round(float(pe), 1)
-    except: pass
-    # Source 2: Screener.in NIFTY page
-    try:
-        r = requests.get("https://www.screener.in/company/NIFTY/",
-                        timeout=8, headers={"User-Agent": "Mozilla/5.0"})
-        m = re.search(r"P/E[^\d]*?(\d{1,2}\.?\d*)", r.text)
-        if m:
-            pe = float(m.group(1))
-            if 8 < pe < 60:
-                _nifty_pe_cache = {"pe": pe, "fetched_at": datetime.now()}
-                return pe
-    except: pass
-    # Source 3: NSE India API
-    try:
-        r = requests.get(
-            "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050",
-            timeout=8, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json",
-                                "Referer": "https://www.nseindia.com/"}
-        )
-        if r.status_code == 200:
-            data = r.json()
-            pe = data.get("data", [{}])[0].get("pe")
-            if pe and 8 < float(pe) < 60:
-                _nifty_pe_cache = {"pe": round(float(pe), 1), "fetched_at": datetime.now()}
-                return round(float(pe), 1)
-    except: pass
-    return 22.0  # historical average fallback — market is currently near fair value
-
-
-def get_market_valuation(pe: float) -> dict:
-    """Return market valuation context based on Nifty PE."""
-    if pe < 15:
-        return {"zone": "Deep Value", "color": "#16a34a", "description": "Market is historically cheap. Aggressive equity allocation justified.", "equity_modifier": 1.15}
-    elif pe < 18:
-        return {"zone": "Undervalued", "color": "#65a30d", "description": "Market is trading below historical average. Good time to be invested.", "equity_modifier": 1.08}
-    elif pe < 22:
-        return {"zone": "Fair Value", "color": "#2563eb", "description": "Market at historical average. Maintain base allocation.", "equity_modifier": 1.0}
-    elif pe < 26:
-        return {"zone": "Slightly Expensive", "color": "#d97706", "description": "Market above historical average. Slightly reduce equity, build cash.", "equity_modifier": 0.90}
-    elif pe < 30:
-        return {"zone": "Expensive", "color": "#ea580c", "description": "Market significantly overvalued. Reduce equity, increase safety assets.", "equity_modifier": 0.80}
-    else:
-        return {"zone": "Bubble Territory", "color": "#dc2626", "description": "Extreme overvaluation. Only highest-conviction equity positions justified.", "equity_modifier": 0.65}
-
-
-# ─── Asset allocation per profile ─────────────────────────────────────────────
-PROFILE_ALLOCATION = {
-    "rj": {
-        "base": {"equity": 90, "gold": 0, "debt": 5, "cash": 5},
-        "pe_sensitive": False,
-        "logic": "RJ believed in staying fully invested. He once said 'I have never tried to time the market and never will.' Maximum equity always.",
-        "gold_instrument": None,
-        "debt_instrument": "Liquid Fund",
-        "cash_note": "Keep as SIP reserve for averaging down on dips",
-    },
-    "buffett": {
-        "base": {"equity": 70, "gold": 5, "debt": 10, "cash": 15},
-        "pe_sensitive": True,
-        "logic": "Buffett is famous for holding cash. At Berkshire, cash reaches 25%+ at market peaks. He waits patiently for the fat pitch.",
-        "gold_instrument": "Sovereign Gold Bond",
-        "debt_instrument": "Short Duration Debt Fund",
-        "cash_note": "Buffett's dry powder — deploy when market offers genuine bargains",
-    },
-    "ben_graham": {
-        "base": {"equity": 50, "gold": 0, "debt": 40, "cash": 10},
-        "pe_sensitive": True,
-        "logic": "Graham's timeless rule: never less than 25% or more than 75% in stocks. Adjust within this band based on market valuation. When stocks are cheap, go to 75%. When expensive, go to 25%.",
-        "gold_instrument": None,
-        "debt_instrument": "Medium Duration Bond Fund",
-        "cash_note": "Margin of safety cash — never fully deploy into stocks",
-    },
-    "parag_parikh": {
-        "base": {"equity": 65, "gold": 10, "debt": 15, "cash": 10},
-        "pe_sensitive": True,
-        "logic": "PPFAS actively manages allocation. Their fund currently holds ~20% cash+debt. They believe gold is a necessary portfolio hedge against currency debasement.",
-        "gold_instrument": "Sovereign Gold Bond (SGB) — 2.5% tax-free interest + gold appreciation",
-        "debt_instrument": "Liquid Fund or FD",
-        "cash_note": "Opportunity fund — PPFAS deployed cash aggressively in March 2020",
-    },
-    "marcellus": {
-        "base": {"equity": 95, "gold": 0, "debt": 0, "cash": 5},
-        "pe_sensitive": False,
-        "logic": "Marcellus is always fully invested. Mukherjea believes their 12 stocks outperform any cash position at any valuation. No market timing.",
-        "gold_instrument": None,
-        "debt_instrument": None,
-        "cash_note": "Transaction reserve only",
-    },
-    "charlie_munger": {
-        "base": {"equity": 80, "gold": 0, "debt": 5, "cash": 15},
-        "pe_sensitive": True,
-        "logic": "Munger concentrated in very few positions. He kept significant cash for the rare exceptional opportunity. 'Opportunity cost is the only real cost.'",
-        "gold_instrument": None,
-        "debt_instrument": "T-Bills / Liquid Fund",
-        "cash_note": "Waiting for the exceptional — Munger would only deploy cash for truly wonderful businesses",
-    },
-    "vijay_kedia": {
-        "base": {"equity": 92, "gold": 0, "debt": 3, "cash": 5},
-        "pe_sensitive": False,
-        "logic": "Kedia stays almost fully invested. His SMILE framework requires long-term conviction — trying to time the market distracts from finding the right businesses.",
-        "gold_instrument": None,
-        "debt_instrument": "Liquid Fund",
-        "cash_note": "Reserve for adding to existing positions on dips",
-    },
-    "peter_lynch": {
-        "base": {"equity": 85, "gold": 0, "debt": 5, "cash": 10},
-        "pe_sensitive": True,
-        "logic": "Lynch was fully invested as a fund manager. For personal portfolios he recommended staying mostly invested but keeping some cash for PEG < 1 opportunities.",
-        "gold_instrument": None,
-        "debt_instrument": "Liquid Fund",
-        "cash_note": "PEG opportunity fund — deploy when you find PEG below 0.5",
-    },
-    "default": {
-        "base": {"equity": 70, "gold": 8, "debt": 12, "cash": 10},
-        "pe_sensitive": True,
-        "logic": "Balanced allocation adjusted for current market valuation.",
-        "gold_instrument": "Sovereign Gold Bond",
-        "debt_instrument": "Short Duration Debt Fund",
-        "cash_note": "Opportunity reserve",
-    },
-}
-
-def compute_asset_allocation(profile_id: str, total_capital: float, nifty_pe: float) -> dict:
-    """Compute final asset allocation based on profile + market PE."""
-    alloc_config = PROFILE_ALLOCATION.get(profile_id, PROFILE_ALLOCATION["default"])
-    base = dict(alloc_config["base"])
-    market = get_market_valuation(nifty_pe)
-
-    if alloc_config["pe_sensitive"]:
-        modifier = market["equity_modifier"]
-        equity_adj = round(base["equity"] * modifier)
-        reduction = base["equity"] - equity_adj
-        base["equity"] = equity_adj
-        # Add reduction to cash
-        base["cash"] = base.get("cash", 0) + reduction
-
-    # Normalize to 100%
-    total = sum(base.values())
-    for k in base:
-        base[k] = round(base[k] / total * 100, 1)
-
-    # Compute rupee amounts
-    amounts = {k: round(v / 100 * total_capital) for k, v in base.items()}
-    equity_capital = amounts["equity"]
-
-    return {
-        "allocation_pct": base,
-        "allocation_amt": amounts,
-        "equity_capital": equity_capital,
-        "nifty_pe": nifty_pe,
-        "market_valuation": market,
-        "logic": alloc_config["logic"],
-        "instruments": {
-            "gold": alloc_config.get("gold_instrument") or "Digital Gold / Gold ETF",
-            "debt": alloc_config.get("debt_instrument") or "Liquid Fund",
-            "cash": alloc_config.get("cash_note") or "Keep in savings account",
-        },
-        "rebalance_triggers": [
-            f"If Nifty PE drops below 16x, shift 10% from debt/cash to equity",
-            f"If Nifty PE rises above 28x, reduce equity by 15%, park in debt",
-            f"Rebalance annually or when any asset class drifts >5% from target",
-        ]
-    }
-
+app = FastAPI(title="stocks.ai API", version="13.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+                   allow_methods=["*"], allow_headers=["*"])
 
 CACHE_FILE = "stock_cache.json"
 SECTOR_CACHE_FILE = "sector_cache.json"
-
 _cache = {}
 _cache_time = None
 _cache_lock = threading.Lock()
 _is_refreshing = False
 _refresh_progress = {"done": 0, "total": 0}
 _sector_averages = {}
+_nifty_pe_cache = {"pe": None, "fetched_at": None}
 
-# ─── NSE Universe ─────────────────────────────────────────────────────────────
-NIFTY_500 = [
+def fetch_nifty_pe() -> float:
+    global _nifty_pe_cache
+    if _nifty_pe_cache["pe"] and _nifty_pe_cache["fetched_at"]:
+        if (datetime.now() - _nifty_pe_cache["fetched_at"]).total_seconds() < 14400:
+            return _nifty_pe_cache["pe"]
+    try:
+        r = requests.get("https://www.screener.in/company/NIFTY/", timeout=8,
+                         headers={"User-Agent":"Mozilla/5.0"})
+        m = re.search(r"P/E[^\d]*?(\d{2,3}\.?\d*)", r.text)
+        if m:
+            pe = float(m.group(1))
+            if 8 < pe < 60:
+                _nifty_pe_cache = {"pe": round(pe,1), "fetched_at": datetime.now()}
+                return round(pe,1)
+    except: pass
+    return 22.0
+
+def get_market_valuation(pe: float) -> dict:
+    if pe < 15: return {"zone":"Deep Value","color":"#16a34a","description":"Market historically cheap. Aggressive equity allocation justified.","equity_modifier":1.15}
+    if pe < 18: return {"zone":"Undervalued","color":"#65a30d","description":"Below historical average. Good time to be fully invested.","equity_modifier":1.08}
+    if pe < 22: return {"zone":"Fair Value","color":"#2563eb","description":"At historical average. Maintain base allocation.","equity_modifier":1.0}
+    if pe < 26: return {"zone":"Slightly Expensive","color":"#d97706","description":"Above historical average. Trim equity slightly, build cash.","equity_modifier":0.90}
+    if pe < 30: return {"zone":"Expensive","color":"#ea580c","description":"Significantly overvalued. Reduce equity, increase safety assets.","equity_modifier":0.80}
+    return {"zone":"Bubble Territory","color":"#dc2626","description":"Extreme overvaluation. Only highest-conviction positions justified.","equity_modifier":0.65}
+
+NSE_SECTOR_MAP = {
+    "HDFCBANK":"Banking","ICICIBANK":"Banking","SBIN":"Banking","KOTAKBANK":"Banking",
+    "AXISBANK":"Banking","INDUSINDBK":"Banking","BANKBARODA":"Banking","PNB":"Banking",
+    "CANBK":"Banking","UNIONBANK":"Banking","IDFCFIRSTB":"Banking","FEDERALBNK":"Banking",
+    "BANDHANBNK":"Banking","RBLBANK":"Banking","INDIANB":"Banking","KARURVYSYA":"Banking",
+    "DCBBANK":"Banking","SOUTHBANK":"Banking","UJJIVAN":"Banking","CENTRALBK":"Banking",
+    "BAJFINANCE":"NBFC","BAJAJFINSV":"NBFC","CHOLAFIN":"NBFC","MUTHOOTFIN":"NBFC",
+    "MANAPPURAM":"NBFC","SHRIRAMFIN":"NBFC","LICHSGFIN":"NBFC","CANFINHOME":"NBFC",
+    "ABCAPITAL":"NBFC","POONAWALLA":"NBFC","CREDITACC":"NBFC","AAVAS":"NBFC",
+    "HOMEFIRST":"NBFC","APTUS":"NBFC","MASFIN":"NBFC","SPANDANA":"NBFC","IIFL":"NBFC",
+    "HDFCLIFE":"Insurance","SBILIFE":"Insurance","ICICIGI":"Insurance","ICICIPRULI":"Insurance",
+    "LICI":"Insurance","STARHEALTH":"Insurance","GICRE":"Insurance","NIACL":"Insurance",
+    "HDFCAMC":"Asset Management","CAMS":"Asset Management","ISEC":"Asset Management",
+    "ANGELONE":"Asset Management","KFINTECH":"Asset Management","CDSL":"Asset Management",
+    "MCX":"Asset Management","UTIAMC":"Asset Management",
+    "TCS":"IT","INFOSYS":"IT","HCLTECH":"IT","WIPRO":"IT","TECHM":"IT",
+    "LTIM":"IT","MPHASIS":"IT","COFORGE":"IT","PERSISTENT":"IT","OFSS":"IT",
+    "TATAELXSI":"IT","LTTS":"IT","KPITTECH":"IT","HAPPSTMNDS":"IT","ZENSARTECH":"IT",
+    "INTELLECT":"IT","MASTEK":"IT","BSOFT":"IT","SAKSOFT":"IT","LATENTVIEW":"IT",
+    "TANLA":"IT","NUCLEUS":"IT","NIITLTD":"IT",
+    "HINDUNILVR":"FMCG","ITC":"FMCG","NESTLEIND":"FMCG","BRITANNIA":"FMCG",
+    "DABUR":"FMCG","MARICO":"FMCG","COLPAL":"FMCG","GODREJCP":"FMCG",
+    "EMAMILTD":"FMCG","TATACONSUM":"FMCG","VBL":"FMCG","MCDOWELL-N":"FMCG",
+    "UBL":"FMCG","PGHH":"FMCG","GILLETTE":"FMCG","RADICO":"FMCG",
+    "JYOTHYLAB":"FMCG","BAJAJCON":"FMCG","VSTIND":"FMCG","GSKCONS":"FMCG",
+    "SUNPHARMA":"Pharma","DRREDDY":"Pharma","CIPLA":"Pharma","DIVISLAB":"Pharma",
+    "TORNTPHARM":"Pharma","AUROPHARMA":"Pharma","LUPIN":"Pharma","ALKEM":"Pharma",
+    "BIOCON":"Pharma","GLAND":"Pharma","NATCOPHARM":"Pharma","IPCALAB":"Pharma",
+    "ABBOTINDIA":"Pharma","PFIZER":"Pharma","LAURUSLABS":"Pharma","GRANULES":"Pharma",
+    "AJANTPHARM":"Pharma","ERIS":"Pharma","JBCHEPHARM":"Pharma","SYNGENE":"Pharma",
+    "LALPATHLAB":"Pharma","METROPOLIS":"Pharma","THYROCARE":"Pharma","SPARC":"Pharma",
+    "POLYMED":"Pharma","SHILPAMED":"Pharma","SEQUENT":"Pharma",
+    "MARUTI":"Auto","TATAMOTORS":"Auto","BAJAJ-AUTO":"Auto","HEROMOTOCO":"Auto",
+    "EICHERMOT":"Auto","TVSMOTORS":"Auto","ASHOKLEY":"Auto","APOLLOTYRE":"Auto",
+    "CEATLTD":"Auto","BALKRISIND":"Auto","MOTHERSON":"Auto","SONACOMS":"Auto",
+    "BOSCHLTD":"Auto","ENDURANCE":"Auto","ESCORTS":"Auto","TIINDIA":"Auto",
+    "GABRIEL":"Auto","JAMNAAUTO":"Auto","SUBROS":"Auto","MINDACORP":"Auto",
+    "WABCOINDIA":"Auto","TALBROAUTO":"Auto","MAHINDCIE":"Auto","SANDHAR":"Auto",
+    "RELIANCE":"Energy","ONGC":"Energy","BPCL":"Energy","IOC":"Energy",
+    "HINDPETRO":"Energy","OIL":"Energy","GAIL":"Energy","PETRONET":"Energy",
+    "ATGL":"Energy","GUJGASLTD":"Energy","IGL":"Energy","MGL":"Energy","MRPL":"Energy",
+    "TATASTEEL":"Metals","JSWSTEEL":"Metals","HINDALCO":"Metals","SAIL":"Metals",
+    "NMDC":"Metals","COALINDIA":"Metals","HINDCOPPER":"Metals","GPIL":"Metals",
+    "WELCORP":"Metals","GRAPHITE":"Metals","TINPLATE":"Metals",
+    "ULTRACEMCO":"Cement","AMBUJACEM":"Cement","RAMCOCEM":"Cement","DALBHARAT":"Cement",
+    "JKCEMENT":"Cement","SHREECEM":"Cement","JKLAKSHMI":"Cement","SAGARCEM":"Cement",
+    "DLF":"Real Estate","GODREJPROP":"Real Estate","PRESTIGE":"Real Estate",
+    "OBEROIRLTY":"Real Estate","PHOENIXLTD":"Real Estate","BRIGADE":"Real Estate",
+    "SOBHA":"Real Estate","KOLTEPATIL":"Real Estate","MAHLIFE":"Real Estate",
+    "LT":"Capital Goods","SIEMENS":"Capital Goods","ABB":"Capital Goods",
+    "BEL":"Capital Goods","BHEL":"Capital Goods","CGPOWER":"Capital Goods",
+    "POLYCAB":"Capital Goods","HAVELLS":"Capital Goods","SCHAEFFLER":"Capital Goods",
+    "TIMKEN":"Capital Goods","ELGIEQUIP":"Capital Goods","CUMMINSIND":"Capital Goods",
+    "THERMAX":"Capital Goods","KSB":"Capital Goods","GRINDWELL":"Capital Goods",
+    "ESABINDIA":"Capital Goods","INGERRAND":"Capital Goods","SKIPPER":"Capital Goods",
+    "ASIANPAINT":"Paints","BERGEPAINT":"Paints","KANSAINER":"Paints","INDPAINT":"Paints",
+    "PIDILITIND":"Chemicals","DEEPAKNTR":"Chemicals","NAVINFLUOR":"Chemicals",
+    "FLUOROCHEM":"Chemicals","SUDARSCHEM":"Chemicals","VINATIORGA":"Chemicals",
+    "FINEORG":"Chemicals","NOCIL":"Chemicals","DCMSHRIRAM":"Chemicals",
+    "ATUL":"Chemicals","GNFC":"Chemicals","CHAMBLFERT":"Chemicals",
+    "DEEPAKFERT":"Chemicals","COROMANDEL":"Chemicals","RALLIS":"Chemicals",
+    "ROSSARI":"Chemicals","EPIGRAL":"Chemicals","HIKAL":"Chemicals",
+    "TITAN":"Consumer Durables","VOLTAS":"Consumer Durables","WHIRLPOOL":"Consumer Durables",
+    "CROMPTON":"Consumer Durables","DIXON":"Consumer Durables","AMBER":"Consumer Durables",
+    "VGUARD":"Consumer Durables","SYMPHONY":"Consumer Durables","KAJARIACER":"Consumer Durables",
+    "TTKPRESTIG":"Consumer Durables","CERA":"Consumer Durables","RELAXO":"Consumer Durables",
+    "NILKAMAL":"Consumer Durables","SAFARI":"Consumer Durables","BAJAJELEC":"Consumer Durables",
+    "CENTURYPLY":"Consumer Durables","GREENPANEL":"Consumer Durables","LAOPALA":"Consumer Durables",
+    "PAGEIND":"Textiles","WELSPUNIND":"Textiles","TRIDENT":"Textiles","KPRMILL":"Textiles",
+    "RAYMOND":"Textiles","CENTURYTEX":"Textiles",
+    "BHARTIARTL":"Telecom","INDUSTOWER":"Telecom","TATACOMM":"Telecom","TEJASNET":"Telecom",
+    "DMART":"Retail","TRENT":"Retail","SHOPERSTOP":"Retail","METROBRAND":"Retail",
+    "WESTLIFE":"Retail","DEVYANI":"Retail","JUBLFOOD":"Retail",
+    "NAUKRI":"Internet","ZOMATO":"Internet","NYKAA":"Internet","POLICYBZR":"Internet",
+    "MAPMYINDIA":"Internet","INDIAMART":"Internet","JUSTDIAL":"Internet","MATRIMONY":"Internet",
+    "IRCTC":"Travel","INDIGO":"Aviation","INDHOTEL":"Travel","WONDERLA":"Travel",
+    "EASEMYTRIP":"Travel","PVRINOX":"Entertainment","SAREGAMA":"Entertainment",
+    "IRFC":"Infra Finance","HUDCO":"Infra Finance","RECLTD":"Infra Finance","PFC":"Infra Finance",
+    "SBICARD":"Fintech","RVNL":"Infrastructure","NBCC":"Infrastructure","RAILTEL":"Infrastructure",
+    "NHPC":"Power","NTPC":"Power","POWERGRID":"Power","TATAPOWER":"Power",
+    "JSWENERGY":"Power","TORNTPOWER":"Power","CESC":"Power",
+    "ADANIPORTS":"Logistics","CONCOR":"Logistics","TCIEXP":"Logistics","VRLLOG":"Logistics",
+    "HAL":"Defence","MTAR":"Defence","CASTROLIND":"Lubricants","GULFOILLUB":"Lubricants",
+}
+
+def sector_for(symbol: str, scraped: str = "Unknown") -> str:
+    if scraped and scraped not in ("Unknown","",None): return scraped
+    return NSE_SECTOR_MAP.get(symbol.upper(),"Unknown")
+
+NIFTY_500 = list(dict.fromkeys([
     "RELIANCE","TCS","HDFCBANK","BHARTIARTL","ICICIBANK","INFOSYS","HINDUNILVR",
     "ITC","LT","KOTAKBANK","HCLTECH","AXISBANK","BAJFINANCE","MARUTI","SUNPHARMA",
     "TITAN","ULTRACEMCO","ASIANPAINT","NESTLEIND","WIPRO","TECHM","ONGC","POWERGRID",
     "NTPC","TATAMOTORS","BAJAJFINSV","ADANIPORTS","COALINDIA","BRITANNIA","CIPLA",
     "DRREDDY","EICHERMOT","HEROMOTOCO","HINDALCO","INDUSINDBK","JSWSTEEL","DIVISLAB",
     "SBIN","TATASTEEL","APOLLOHOSP","PIDILITIND","TATACONSUM","DMART","HAVELLS",
-    "POLYCAB","TORNTPHARM","MARICO","DABUR","HDFCLIFE","BAJAJ-AUTO","ADANIENT",
-    "AMBUJACEM","BANKBARODA","BERGEPAINT","BEL","BPCL","CANBK","CHOLAFIN","COLPAL",
-    "DLF","GAIL","GODREJCP","GRASIM","HAL","HDFCAMC","ICICIGI","ICICIPRULI",
-    "INDUSTOWER","INDIGO","IOC","IRCTC","JINDALSTEL","LICI","LTIM","LUPIN",
-    "MCDOWELL-N","NHPC","NMDC","OFSS","OIL","PAGEIND","PERSISTENT","PETRONET",
-    "PFC","PIIND","PNB","RECLTD","SAIL","SHRIRAMFIN","SIEMENS","TATAPOWER","TRENT",
-    "VBL","ZOMATO","ABCAPITAL","ALKEM","APOLLOTYRE","ASHOKLEY","ASTRAL","AUROPHARMA",
-    "BALKRISIND","BANDHANBNK","BIOCON","CAMS","CANFINHOME","COFORGE","CONCOR",
-    "CROMPTON","CUMMINSIND","DEEPAKNTR","DIXON","ESCORTS","EXIDEIND","FEDERALBNK",
-    "FORTIS","GLENMARK","GODREJIND","GODREJPROP","GRANULES","IDFCFIRSTB","IEX",
-    "INDHOTEL","INDIANB","ISEC","JKCEMENT","JUBLFOOD","KAJARIACER","KANSAINER",
-    "LICHSGFIN","LTTS","MANAPPURAM","MAXHEALTH","MCX","MFSL","MPHASIS","MRF",
-    "MUTHOOTFIN","NATCOPHARM","NAUKRI","OBEROIRLTY","PAGEIND","PFIZER","PHOENIX",
-    "PRESTIGE","RADICO","RAMCOCEM","RELAXO","RITES","ROUTE","SBICARD","SBILIFE",
-    "SCHAEFFLER","SKFINDIA","SONACOMS","SRF","SUNDARMFIN","SUPREMEIND","SYNGENE",
-    "TATACHEM","TATACOMM","TATAELXSI","TVSMOTORS","UBL","UNIONBANK","VGUARD",
-    "VOLTAS","WHIRLPOOL","AAVAS","AFFLE","AJANTPHARM","AMBER","ANGELONE","APTUS",
-    "ATGL","CDSL","CENTURYPLY","CERA","CGPOWER","CHAMBLFERT","CLEAN","CREDITACC",
-    "DALBHARAT","DCMSHRIRAM","DELHIVERY","DEVYANI","DOMS","ELGIEQUIP","EMAMILTD",
-    "ENDURANCE","ERIS","FINEORG","FINPIPE","FLUOROCHEM","GAEL","GALAXYSURF","GICRE",
-    "GLAND","GNFC","GREENPANEL","GRINDWELL","GUJGASLTD","HBLPOWER","HIKAL",
-    "HOMEFIRST","HUDCO","INDIAMART","INDIGOPNTS","INTELLECT","IPCALAB","IRB","IRFC",
-    "JBCHEPHARM","JKPAPER","JSWENERGY","JUSTDIAL","KPITTECH","LALPATHLAB","LAURUSLABS",
-    "MAPMYINDIA","METROBRAND","NBCC","NLCINDIA","OLECTRA","PGHH","PRINCEPIPE",
-    "RAJESHEXPO","ROSSARI","SAFARI","STARHEALTH","TANLA","THYROCARE","TTKPRESTIG",
-    "UTIAMC","VINATIORGA","ZEEL","ABBOTINDIA","AIAENG","ATUL","BAJAJELEC","BEML",
-    "BHARATFORG","BHEL","BOSCHLTD","CASTROLIND","CEATLTD","CENTRALBK","CENTURYTEX",
-    "COROMANDEL","CRISIL","DEEPAKFERT","EDELWEISS","EPIGRAL","EQUITASBNK","ESABINDIA",
-    "GABRIEL","GILLETTE","GIPCL","GPIL","GRAPHITE","GSKCONS","GULFOILLUB",
-    "HAPPSTMNDS","HINDCOPPER","HPCL","IDBI","IFBIND","IIFL","INDIACEM","INGERRAND",
-    "INOXWIND","INSECTICID","ISGEC","ITI","JAMNAAUTO","JKIL","JKLAKSHMI","JKTYRE",
-    "JMFINANCIL","KARURVYSYA","KFINTECH","KIMS","KNRCON","KOLTEPATIL","KPRMILL",
-    "KRBL","LAOPALA","LATENTVIEW","LAXMIMACH","LUXIND","MAHINDCIE","MASFIN",
-    "MATRIMONY","MAYURUNIQ","MINDACORP","MMTC","MOLDTKPAC","MOTHERSON","MRPL",
-    "NAVINFLUOR","NETWORK18","NFL","NIITLTD","NILKAMAL","NOCIL","NUCLEUS","OLECTRA",
-    "ORIENTELEC","PANACEABIO","PATELENG","PATINTLOG","PENIND","PGHL","PHOENIXLTD",
-    "PILANIINVS","PLASTIBLEN","POKARNA","POLYPLEX","POLYMED","POONAWALLA","PRICOLLTD",
-    "PVRINOX","QUESS","RAILTEL","RAIN","RALLIS","RAYMOND","RBLBANK","REDINGTON",
-    "REPCOHOME","RVNL","SAGARCEM","SAKSOFT","SANDHAR","SANGHIIND","SAREGAMA",
-    "SEQUENT","SHAREINDIA","SHILPAMED","SHOPERSTOP","SHYAMMETL","SKIPPER","SOLARA",
-    "SPANDANA","SPARC","STYLAM","SUBROS","SUDARSCHEM","SUMICHEM","SUNDARAM",
-    "SUPRIYA","SWSOLAR","SYMPHONY","TALBROAUTO","TCIEXP","TCNSBRANDS","TEJASNET",
-    "TIINDIA","TIMKEN","TINPLATE","TIPSINDLTD","TITAGARH","TORNTPOWER","TRIDENT",
-    "TRIVENI","TTML","UCOBANK","UFLEX","UJJIVAN","UNIPARTS","UNOMINDA","UTTAMSUGAR",
-    "VINATIORGA","VIPIND","VISAKAIND","VOLTAMP","VRLLOG","VSTIND","WABCOINDIA",
-    "WELCORP","WELSPUNIND","WESTLIFE","WONDERLA","ZENSARTECH","NYKAA","POLICYBZR",
-    "PAYTM","DELHIVERY","CAMPUS","DEVYANI","EASEMYTRIP","NAUKRI","IRFC","HUDCO",
-]
-NIFTY_500 = list(dict.fromkeys(NIFTY_500))  # deduplicate
+    "POLYCAB","TORNTPHARM","MARICO","DABUR","HDFCLIFE","BAJAJ-AUTO","AMBUJACEM",
+    "BANKBARODA","BERGEPAINT","BEL","BPCL","CANBK","CHOLAFIN","COLPAL","DLF",
+    "GAIL","GODREJCP","GRASIM","HAL","HDFCAMC","ICICIGI","ICICIPRULI","INDUSTOWER",
+    "INDIGO","IOC","IRCTC","LICI","LTIM","LUPIN","MCDOWELL-N","NHPC","NMDC",
+    "OFSS","OIL","PAGEIND","PERSISTENT","PETRONET","PFC","PNB","RECLTD","SAIL",
+    "SHRIRAMFIN","SIEMENS","TATAPOWER","TRENT","VBL","ZOMATO","ABCAPITAL","ALKEM",
+    "APOLLOTYRE","ASHOKLEY","ASTRAL","AUROPHARMA","BALKRISIND","BANDHANBNK","BIOCON",
+    "CAMS","CANFINHOME","COFORGE","CONCOR","CROMPTON","CUMMINSIND","DEEPAKNTR",
+    "DIXON","ESCORTS","EXIDEIND","FEDERALBNK","FORTIS","GLENMARK","GODREJPROP",
+    "GRANULES","IDFCFIRSTB","INDHOTEL","INDIANB","ISEC","JKCEMENT","JUBLFOOD",
+    "KAJARIACER","KANSAINER","LICHSGFIN","LTTS","MANAPPURAM","MAXHEALTH","MCX",
+    "MPHASIS","MRF","MUTHOOTFIN","NATCOPHARM","NAUKRI","OBEROIRLTY","PFIZER",
+    "PHOENIXLTD","PRESTIGE","RADICO","RAMCOCEM","RELAXO","SBICARD","SBILIFE",
+    "SCHAEFFLER","SONACOMS","SRF","SUNDARMFIN","SUPREMEIND","SYNGENE","TATACHEM",
+    "TATACOMM","TATAELXSI","TVSMOTORS","UBL","UNIONBANK","VGUARD","VOLTAS",
+    "WHIRLPOOL","AAVAS","AFFLE","AJANTPHARM","AMBER","ANGELONE","APTUS","ATGL",
+    "CDSL","CENTURYPLY","CERA","CGPOWER","CHAMBLFERT","CREDITACC","DALBHARAT",
+    "DCMSHRIRAM","DEEPAKFERT","DEVYANI","ELGIEQUIP","EMAMILTD","ENDURANCE","ERIS",
+    "FINEORG","FLUOROCHEM","GICRE","GLAND","GNFC","GREENPANEL","GRINDWELL",
+    "GUJGASLTD","HAPPSTMNDS","HIKAL","HOMEFIRST","HUDCO","INDIAMART","INTELLECT",
+    "IPCALAB","IRFC","JBCHEPHARM","JSWENERGY","JUSTDIAL","KPITTECH","LALPATHLAB",
+    "LAOPALA","LATENTVIEW","LAURUSLABS","MAPMYINDIA","METROBRAND","NBCC","NILKAMAL",
+    "NOCIL","NYKAA","PGHH","POLICYBZR","POONAWALLA","PVRINOX","RAILTEL","RAIN",
+    "RALLIS","RAYMOND","RBLBANK","RVNL","SAGARCEM","SAKSOFT","SANDHAR","SAREGAMA",
+    "SHILPAMED","SHOPERSTOP","SOLARA","SPANDANA","SPARC","SUBROS","SUDARSCHEM",
+    "SYMPHONY","TANLA","TCIEXP","TEJASNET","THYROCARE","TIINDIA","TIMKEN","TINPLATE",
+    "TORNTPOWER","TRIDENT","UJJIVAN","UTIAMC","VINATIORGA","VRLLOG","WABCOINDIA",
+    "WELCORP","WELSPUNIND","WESTLIFE","WONDERLA","ZENSARTECH","EASEMYTRIP",
+    "CASTROLIND","GULFOILLUB","GRAPHITE","HINDCOPPER","GPIL","ABBOTINDIA","AIAENG",
+    "ATUL","BAJAJELEC","BEML","BHARATFORG","BOSCHLTD","CEATLTD","CENTRALBK",
+    "CENTURYTEX","COROMANDEL","CRISIL","EQUITASBNK","ESABINDIA","GABRIEL","GILLETTE",
+    "GSKCONS","HPCL","IIFL","INGERRAND","ISGEC","JAMNAAUTO","JKIL","JKLAKSHMI",
+    "JKTYRE","KARURVYSYA","KFINTECH","KIMS","KRBL","LAXMIMACH","LUXIND","MASFIN",
+    "MATRIMONY","MAYURUNIQ","MOLDTKPAC","MOTHERSON","MRPL","NAVINFLUOR","SKIPPER",
+    "ROSSARI","EPIGRAL","MTAR","MGL","IGL","TRENT","JUBLFOOD","DEVYANI","CAMPUS",
+    "MINDACORP","HAPPSTMNDS","BSOFT","NIITLTD","NETWORK18","KNRCON",
+]))
 
-# ─── Hardcoded sector map for immediate sector avg computation ────────────────
-NSE_SECTOR_MAP = {
-    # Banking & Finance
-    "HDFCBANK":"Banking","ICICIBANK":"Banking","SBIN":"Banking","KOTAKBANK":"Banking",
-    "AXISBANK":"Banking","INDUSINDBK":"Banking","BANKBARODA":"Banking","PNB":"Banking",
-    "CANBK":"Banking","UNIONBANK":"Banking","IDFCFIRSTB":"Banking","FEDERALBNK":"Banking",
-    "BANDHANBNK":"Banking","RBLBANK":"Banking","INDIANB":"Banking","KARURVYSYA":"Banking",
-    "BAJFINANCE":"NBFC","BAJAJFINSV":"NBFC","CHOLAFIN":"NBFC","MUTHOOTFIN":"NBFC",
-    "MANAPPURAM":"NBFC","SHRIRAMFIN":"NBFC","LICHSGFIN":"NBFC","CANFINHOME":"NBFC",
-    "HDFCLIFE":"Insurance","SBILIFE":"Insurance","ICICIGI":"Insurance","ICICIPRULI":"Insurance",
-    "LICI":"Insurance","HDFCAMC":"Asset Management","ABCAPITAL":"NBFC",
-    # IT
-    "TCS":"IT","INFOSYS":"IT","HCLTECH":"IT","WIPRO":"IT","TECHM":"IT",
-    "LTIM":"IT","MPHASIS":"IT","COFORGE":"IT","PERSISTENT":"IT","OFSS":"IT",
-    "TATAELXSI":"IT","LTTS":"IT","KPITTECH":"IT","HAPPSTMNDS":"IT","ZENSARTECH":"IT",
-    # Consumer/FMCG
-    "HINDUNILVR":"FMCG","ITC":"FMCG","NESTLEIND":"FMCG","BRITANNIA":"FMCG",
-    "DABUR":"FMCG","MARICO":"FMCG","COLPAL":"FMCG","GODREJCP":"FMCG",
-    "EMAMILTD":"FMCG","TATACONSUM":"FMCG","RADICO":"FMCG","VBL":"FMCG",
-    "MCDOWELL-N":"FMCG","UBL":"FMCG","PGHH":"FMCG","GSKCONS":"FMCG",
-    # Pharma
-    "SUNPHARMA":"Pharma","DRREDDY":"Pharma","CIPLA":"Pharma","DIVISLAB":"Pharma",
-    "TORNTPHARM":"Pharma","AUROPHARMA":"Pharma","LUPIN":"Pharma","ALKEM":"Pharma",
-    "BIOCON":"Pharma","GLAND":"Pharma","NATCOPHARM":"Pharma","IPCALAB":"Pharma",
-    "ABBOTINDIA":"Pharma","PFIZER":"Pharma","LAURUSLABS":"Pharma","GRANULES":"Pharma",
-    # Auto
-    "MARUTI":"Auto","TATAMOTORS":"Auto","BAJAJ-AUTO":"Auto","HEROMOTOCO":"Auto",
-    "EICHERMOT":"Auto","TVSMOTORS":"Auto","ASHOKLEY":"Auto","APOLLOTYRE":"Auto",
-    "CEATLTD":"Auto","BALKRISIND":"Auto","MOTHERSON":"Auto","SONACOMS":"Auto",
-    "BOSCHLTD":"Auto","ENDURANCE":"Auto","ESCORTS":"Auto","TIINDIA":"Auto",
-    # Energy & Oil
-    "RELIANCE":"Energy","ONGC":"Energy","BPCL":"Energy","IOC":"Energy",
-    "HINDPETRO":"Energy","OIL":"Energy","GAIL":"Energy","PETRONET":"Energy",
-    "ATGL":"Energy","GUJGASLTD":"Energy","IGL":"Energy","MGL":"Energy",
-    # Metals & Mining
-    "TATASTEEL":"Metals","JSWSTEEL":"Metals","HINDALCO":"Metals","SAIL":"Metals",
-    "NMDC":"Metals","COALINDIA":"Metals","VEDL":"Metals","HINDCOPPER":"Metals",
-    "NATIONALUM":"Metals","AIAENG":"Metals","GRAPHITE":"Metals","GPIL":"Metals",
-    # Cement
-    "ULTRACEMCO":"Cement","AMBUJACEM":"Cement","RAMCOCEM":"Cement","DALBHARAT":"Cement",
-    "JKCEMENT":"Cement","SHREECEM":"Cement","JKLAKSHMI":"Cement","HEIDELBERG":"Cement",
-    # Real Estate
-    "DLF":"Real Estate","GODREJPROP":"Real Estate","PRESTIGE":"Real Estate",
-    "OBEROIRLTY":"Real Estate","PHOENIXLTD":"Real Estate","BRIGADE":"Real Estate",
-    # Capital Goods
-    "LT":"Capital Goods","SIEMENS":"Capital Goods","ABB":"Capital Goods",
-    "HAL":"Capital Goods","BEL":"Capital Goods","BHEL":"Capital Goods",
-    "CGPOWER":"Capital Goods","POLYCAB":"Capital Goods","HAVELLS":"Capital Goods",
-    "SCHAEFFLER":"Capital Goods","TIMKEN":"Capital Goods","ELGIEQUIP":"Capital Goods",
-    # Paints & Chemicals
-    "ASIANPAINT":"Paints","BERGEPAINT":"Paints","KANSAINER":"Paints","INDPAINT":"Paints",
-    "PIDILITIND":"Chemicals","DEEPAKNTR":"Chemicals","NAVINFLUOR":"Chemicals",
-    "FLUOROCHEM":"Chemicals","SUDARSCHEM":"Chemicals","VINATIORGA":"Chemicals",
-    "FINEORG":"Chemicals","NOCIL":"Chemicals","DCMSHRIRAM":"Chemicals",
-    # Consumer Durables
-    "TITAN":"Consumer Durables","VOLTAS":"Consumer Durables","WHIRLPOOL":"Consumer Durables",
-    "CROMPTON":"Consumer Durables","DIXON":"Consumer Durables","AMBER":"Consumer Durables",
-    "VGUARD":"Consumer Durables","SYMPHONY":"Consumer Durables","HAVELLS":"Consumer Durables",
-    # Telecom
-    "BHARTIARTL":"Telecom","INDUSTOWER":"Telecom","TATACOMM":"Telecom",
-    # Retail
-    "DMART":"Retail","TRENT":"Retail","SHOPERSTOP":"Retail","ZOMATO":"Retail",
-    # Specialty
-    "NAUKRI":"Internet","NYKAA":"Internet","POLICYBZR":"Insurance",
-    "IRCTC":"Travel","INDIGO":"Aviation","SPICEJET":"Aviation",
-    "PAGEIND":"Textiles","WELSPUNIND":"Textiles","TRIDENT":"Textiles",
-}
-
-def get_sector_for_symbol(symbol: str, scraped_sector: str) -> str:
-    """Return best sector for a symbol, using hardcoded map as fallback."""
-    if scraped_sector and scraped_sector not in ("Unknown", ""):
-        return scraped_sector
-    return NSE_SECTOR_MAP.get(symbol, "Unknown")
-
-
-# ─── yfinance data fetch ───────────────────────────────────────────────────────
-def fetch_yfinance(symbol: str) -> dict:
-    """Fetch comprehensive data from Yahoo Finance."""
-    try:
-        ticker = yf.Ticker(f"{symbol}.NS")
-        info = ticker.info
-        if not info or info.get("regularMarketPrice") is None and info.get("currentPrice") is None:
-            # Try BSE suffix
-            ticker = yf.Ticker(f"{symbol}.BO")
-            info = ticker.info
-
-        if not info: return {}
-
-        # Get financials
-        try:
-            income_stmt = ticker.financials  # annual
-            balance_sheet = ticker.balance_sheet
-            cash_flow = ticker.cashflow
-            quarterly_financials = ticker.quarterly_financials
-        except: income_stmt = balance_sheet = cash_flow = quarterly_financials = None
-
-        # Helper to safely get value
-        def safe(key, default=None):
-            v = info.get(key)
-            return v if v is not None else default
-
-        # Price data
-        current_price = safe("currentPrice") or safe("regularMarketPrice")
-        prev_close = safe("previousClose") or safe("regularMarketPreviousClose")
-        price_change_pct = ((current_price - prev_close) / prev_close * 100) if current_price and prev_close and prev_close > 0 else None
-
-        # Ratios
-        pe = safe("trailingPE") or safe("forwardPE")
-        pb = safe("priceToBook")
-        roe = safe("returnOnEquity")
-        roa = safe("returnOnAssets")
-        de = safe("debtToEquity")
-        if de: de = de / 100  # yfinance gives it as percentage
-        opm = safe("operatingMargins")
-        npm = safe("profitMargins")
-        rev_growth = safe("revenueGrowth")
-        earn_growth = safe("earningsGrowth")
-        current_ratio = safe("currentRatio")
-        quick_ratio = safe("quickRatio")
-        dy = safe("dividendYield")
-        eps = safe("trailingEps")
-        beta = safe("beta")
-
-        # Market data
-        market_cap = safe("marketCap")
-        w52_high = safe("fiftyTwoWeekHigh")
-        w52_low = safe("fiftyTwoWeekLow")
-        avg_volume = safe("averageVolume")
-        ev_ebitda = safe("enterpriseToEbitda")
-        ev_revenue = safe("enterpriseToRevenue")
-        peg = safe("pegRatio")
-        fcf = safe("freeCashflow")
-        revenue = safe("totalRevenue")
-        ebitda = safe("ebitda")
-
-        # Promoter / institutional
-        held_pct_insiders = safe("heldPercentInsiders")
-        held_pct_institutions = safe("heldPercentInstitutions")
-
-        # Company info
-        company_name = safe("longName") or safe("shortName") or symbol
-        sector = safe("sector") or safe("industry") or "Unknown"
-        industry = safe("industry") or sector
-        description = safe("longBusinessSummary", "")[:400] if safe("longBusinessSummary") else ""
-        website = safe("website", "")
-        employees = safe("fullTimeEmployees")
-
-        # Analyst data
-        rec = safe("recommendationKey", "")
-        target_price = safe("targetMeanPrice")
-        num_analysts = safe("numberOfAnalystOpinions")
-
-        # Quarterly revenue/profit arrays
-        quarterly_revenue = []
-        quarterly_profit = []
-        if quarterly_financials is not None:
-            try:
-                cols = quarterly_financials.columns[:8]
-                if "Total Revenue" in quarterly_financials.index:
-                    quarterly_revenue = [float(quarterly_financials.loc["Total Revenue", c]) / 1e7
-                                        for c in cols if quarterly_financials.loc["Total Revenue", c] is not None]
-                if "Net Income" in quarterly_financials.index:
-                    quarterly_profit = [float(quarterly_financials.loc["Net Income", c]) / 1e7
-                                       for c in cols if quarterly_financials.loc["Net Income", c] is not None]
-            except: pass
-
-        # Annual revenue/profit (5 years)
-        annual_revenue = []
-        annual_profit = []
-        if income_stmt is not None:
-            try:
-                cols = income_stmt.columns[:5]
-                if "Total Revenue" in income_stmt.index:
-                    annual_revenue = [float(income_stmt.loc["Total Revenue", c]) / 1e7 for c in cols]
-                if "Net Income" in income_stmt.index:
-                    annual_profit = [float(income_stmt.loc["Net Income", c]) / 1e7 for c in cols]
-            except: pass
-
-        # ROCE computation: EBIT / Capital Employed
-        roce = None
-        if income_stmt is not None and balance_sheet is not None:
-            try:
-                ebit = income_stmt.loc["EBIT", income_stmt.columns[0]] if "EBIT" in income_stmt.index else None
-                total_assets = balance_sheet.loc["Total Assets", balance_sheet.columns[0]] if "Total Assets" in balance_sheet.index else None
-                current_liab = balance_sheet.loc["Current Liabilities", balance_sheet.columns[0]] if "Current Liabilities" in balance_sheet.index else None
-                if ebit and total_assets and current_liab:
-                    capital_employed = total_assets - current_liab
-                    roce = float(ebit) / float(capital_employed) if capital_employed > 0 else None
-            except: pass
-
-        # Interest coverage
-        interest_coverage = None
-        if income_stmt is not None:
-            try:
-                ebit = income_stmt.loc["EBIT", income_stmt.columns[0]] if "EBIT" in income_stmt.index else None
-                interest = income_stmt.loc["Interest Expense", income_stmt.columns[0]] if "Interest Expense" in income_stmt.index else None
-                if ebit and interest and float(interest) != 0:
-                    interest_coverage = abs(float(ebit) / float(interest))
-            except: pass
-
-        # Book value per share
-        book_value = None
-        if pb and current_price and pb > 0:
-            book_value = current_price / pb
-
-        sector = get_sector_for_symbol(symbol, sector)
-        return {
-            "company_name": company_name,
-            "sector": sector,
-            "industry": industry,
-            "description": description,
-            "website": website,
-            "employees": employees,
-            "current_price": current_price,
-            "price_change_pct": price_change_pct,
-            "market_cap": market_cap,
-            "52w_high": w52_high,
-            "52w_low": w52_low,
-            "avg_volume": avg_volume,
-            "pe_ratio": pe,
-            "pb_ratio": pb,
-            "ev_ebitda": ev_ebitda,
-            "ev_revenue": ev_revenue,
-            "peg_ratio": peg,
-            "book_value": book_value,
-            "roe": roe,
-            "roa": roa,
-            "roce": roce,
-            "debt_to_equity": de,
-            "operating_margins": opm,
-            "net_margins": npm,
-            "revenue_growth": rev_growth,
-            "earnings_growth": earn_growth,
-            "current_ratio": current_ratio,
-            "quick_ratio": quick_ratio,
-            "interest_coverage": interest_coverage,
-            "dividend_yield": dy,
-            "eps": eps,
-            "beta": beta,
-            "fcf": fcf,
-            "revenue": revenue,
-            "ebitda": ebitda,
-            "promoter_holding": held_pct_insiders,
-            "institutional_holding": held_pct_institutions,
-            "analyst_recommendation": rec,
-            "target_price": target_price,
-            "num_analysts": num_analysts,
-            "quarterly_revenue": quarterly_revenue[:8],
-            "quarterly_profit": quarterly_profit[:8],
-            "annual_revenue": annual_revenue[:5],
-            "annual_profit": annual_profit[:5],
-            "pros": [],
-            "cons": [],
-        }
-    except Exception as e:
-        print(f"  yfinance error {symbol}: {e}")
-        return {}
-
-
-def fetch_screener_fallback(symbol: str) -> dict:
-    """Fallback to Screener.in scraping for stocks yfinance doesn't cover."""
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCREENER.IN SCRAPER — Gets ALL fields including OPM, NPM, D/E, Current Ratio
+# ═══════════════════════════════════════════════════════════════════════════════
+def fetch_screener(symbol: str) -> dict:
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://www.screener.in/",
+        "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language":"en-US,en;q=0.9","Referer":"https://www.screener.in/",
     })
-    try:
-        session.get("https://www.screener.in/", timeout=8)
-        time.sleep(0.3)
+    try: session.get("https://www.screener.in/",timeout=6)
     except: pass
 
-    for suffix in ["/consolidated/", "/"]:
+    def pn(text):
+        if not text: return None
+        t = str(text).strip().replace(",","").replace("₹","").replace("%","").replace("Cr.","").replace("Cr","").replace("x","").strip()
+        if t in ("","-","—","N/A","--","NA","\xa0"): return None
+        try: return float(t.split()[0])
+        except: return None
+
+    for suffix in ["/consolidated/","/"]:
         try:
-            url = f"https://www.screener.in/company/{symbol}{suffix}"
-            r = session.get(url, timeout=12)
+            r = session.get(f"https://www.screener.in/company/{symbol}{suffix}",timeout=15)
+            if r.status_code in (404,403,429): continue
             if r.status_code != 200: continue
-            soup = BeautifulSoup(r.text, "html.parser")
+            soup = BeautifulSoup(r.text,"html.parser")
             if not soup.select_one("#top-ratios"): continue
 
-            all_kv = {}
-            for li in soup.select("li"):
-                ne = li.select_one(".name"); ve = li.select_one(".number,.value")
-                if ne and ve:
-                    k = ne.get_text(strip=True); v = ve.get_text(strip=True)
-                    if k and v: all_kv[k] = v
+            kv = {}
+            for li in soup.select("#top-ratios li"):
+                n = li.select_one(".name"); v = li.select_one(".number,.nowrap,.value")
+                if n and v: kv[n.get_text(strip=True)] = v.get_text(strip=True)
 
-            def parse_num(text):
-                if not text: return None
-                text = str(text).strip().replace(",","").replace("₹","").replace("%","").replace("Cr.","").replace("Cr","").strip()
-                if text in ("","-","—","N/A"): return None
-                try: return float(text)
-                except: return None
+            for section in soup.select("section"):
+                for row in section.select("table tbody tr"):
+                    cells = row.select("td,th")
+                    if len(cells) < 2: continue
+                    rn = cells[0].get_text(strip=True)
+                    if not rn or len(rn) > 70: continue
+                    for c in cells[1:]:
+                        v = c.get_text(strip=True)
+                        if v and v not in ("-","—","","--"):
+                            kv[rn] = v; break
 
             def get(*keys):
                 for k in keys:
-                    if k in all_kv: return parse_num(all_kv[k])
-                    for ak in all_kv:
-                        if k.lower() in ak.lower(): return parse_num(all_kv[ak])
+                    if k in kv: return pn(kv[k])
+                    for ak in kv:
+                        if k.lower() == ak.lower() or (k.lower() in ak.lower() and len(ak) < len(k)+25):
+                            v = pn(kv[ak])
+                            if v is not None: return v
                 return None
 
-            current_price = get("Current Price")
-            mc_cr = get("Market Cap")
-            pe = get("Stock P/E","P/E")
-            book_value = get("Book Value")
-            pb = round(current_price/book_value,2) if current_price and book_value and book_value > 0 else None
-            roe_raw = get("ROE","Return on equity"); roe = (roe_raw/100) if roe_raw else None
-            roce_raw = get("ROCE","Return on capital employed"); roce = (roce_raw/100) if roce_raw else None
-            de = get("Debt to equity","Debt / Equity","D/E")
-            opm_raw = get("OPM","Operating Profit Margin"); opm = (opm_raw/100) if opm_raw else None
-            npm_raw = get("Net profit margin","NPM","Net Profit %"); npm = (npm_raw/100) if npm_raw else None
-            dy_raw = get("Dividend Yield"); dy = (dy_raw/100) if dy_raw else None
-            ph_raw = get("Promoter holding","Promoter Holding"); ph = (ph_raw/100) if ph_raw else None
-            eps = get("EPS","Earnings per share")
-            cr = get("Current ratio","Current Ratio")
-            # EV/EBITDA from screener
-            ev_ebitda = get("EV / EBITDA","EV/EBITDA","Enterprise Value/EBITDA")
-            # Revenue and profit for EBITDA calc
-            revenue_raw = get("Sales","Revenue","Total Revenue")
-            revenue = revenue_raw * 1e7 if revenue_raw else None
-            # Compute EBITDA from OPM * Revenue if not directly available  
-            ebitda = None
-            if revenue and opm: ebitda = revenue * opm
-            # EV/EBITDA fallback
-            if not ev_ebitda and mc_cr and ebitda and ebitda > 0:
-                ev_ebitda = round((mc_cr * 1e7) / ebitda, 1)
+            price     = get("Current Price")
+            mc_cr     = get("Market Cap")
+            pe        = get("Stock P/E","P/E")
+            bv        = get("Book Value")
+            pb        = round(price/bv,2) if price and bv and bv>0 else None
+            roe_r     = get("ROE","Return on equity","Return on Equity")
+            roe       = roe_r/100 if roe_r else None
+            roce_r    = get("ROCE","Return on capital employed","Return on Capital Employed")
+            roce      = roce_r/100 if roce_r else None
+            opm_r     = get("OPM","OPM %","Operating Profit Margin","Operating profit margin")
+            if not opm_r:
+                op = get("Operating Profit","EBIT","PBDIT")
+                sal = get("Sales","Revenue","Net Sales")
+                if op and sal and sal>0: opm_r = op/sal*100
+            opm       = opm_r/100 if opm_r else None
+            npm_r     = get("Net Profit %","Net profit margin","NPM","Profit after tax %","PAT %")
+            if not npm_r:
+                pat = get("Net Profit","Profit after tax","PAT")
+                sal2 = get("Sales","Revenue","Net Sales")
+                if pat and sal2 and sal2>0: npm_r = pat/sal2*100
+            npm       = npm_r/100 if npm_r else None
+            de        = get("Debt to equity","Debt / Equity","D/E Ratio","Debt to Equity")
+            cr        = get("Current Ratio","Current ratio")
+            dy_r      = get("Dividend Yield","Div. Yield","Dividend yield")
+            dy        = dy_r/100 if dy_r else None
+            ph_r      = get("Promoter holding","Promoter Holding","Promoter")
+            ph        = ph_r/100 if ph_r else None
+            pledge_r  = get("Pledge %","Pledged percentage","Pledged %")
+            pledge    = pledge_r/100 if pledge_r else None
+            eps       = get("EPS","EPS (TTM)","Earnings per Share")
+            ic        = get("Interest Coverage","Interest coverage")
+            sales_raw = get("Sales","Revenue","Net Sales","Total Revenue")
+            revenue   = sales_raw*1e7 if sales_raw else None
+            op_raw    = get("Operating Profit","EBIT","PBDIT","PBIT")
+            ebitda    = op_raw*1e7 if op_raw else (revenue*opm if revenue and opm else None)
+            ev_ebitda = round((mc_cr*1e7)/ebitda,1) if mc_cr and ebitda and ebitda>0 else None
+            fcf_r     = get("Free Cash Flow","FCF")
+            fcf       = fcf_r*1e7 if fcf_r else None
 
-            hl = all_kv.get("High / Low","")
+            hl = kv.get("High / Low","")
             w52h = w52l = None
-            if hl and "/" in hl:
+            if "/" in hl:
                 parts = hl.replace("₹","").replace(",","").split("/")
-                w52h = parse_num(parts[0]); w52l = parse_num(parts[1]) if len(parts)>1 else None
+                w52h = pn(parts[0]); w52l = pn(parts[1]) if len(parts)>1 else None
 
-            company_name = symbol
-            el = soup.select_one("h1")
-            if el: company_name = el.get_text(strip=True)
+            name = symbol
+            for sel in ["h1.margin-0","h1",".company-name"]:
+                el = soup.select_one(sel)
+                if el:
+                    t = el.get_text(strip=True)
+                    if t and 2<len(t)<100: name=t; break
 
-            sector = "Unknown"
+            sect = "Unknown"
             for a in soup.select("a[href*='/screen/']"):
                 t = a.get_text(strip=True)
-                if t and 2 < len(t) < 40 and t not in ("Screener","Login","Sign Up","Home","Screen","Advanced"):
-                    sector = t; break
+                if t and 2<len(t)<50 and t not in ("Screener","Login","Sign Up","Home","Screen","Advanced","Export","Back"):
+                    sect=t; break
 
-            pros = [li.get_text(strip=True) for li in soup.select(".pros li")][:4]
-            cons = [li.get_text(strip=True) for li in soup.select(".cons li")][:4]
+            pros = [li.get_text(strip=True) for li in soup.select(".pros li,#top-pros li")][:5]
+            cons = [li.get_text(strip=True) for li in soup.select(".cons li,#top-cons li")][:5]
 
-            sector = get_sector_for_symbol(symbol, sector)
+            q_rev=[]; q_pat=[]
+            for sec in soup.select("section"):
+                h2=sec.find(["h2","h3"])
+                if not h2: continue
+                title=h2.get_text(strip=True).lower()
+                if "quarterly" in title or "results" in title:
+                    for row in sec.select("table tbody tr"):
+                        cells=row.select("td")
+                        if not cells: continue
+                        lbl=cells[0].get_text(strip=True).lower()
+                        if "sales" in lbl or "revenue" in lbl:
+                            q_rev=[pn(c.get_text()) for c in cells[1:9]]
+                            q_rev=[v for v in q_rev if v is not None]
+                        if "net profit" in lbl or "profit after" in lbl:
+                            q_pat=[pn(c.get_text()) for c in cells[1:9]]
+                            q_pat=[v for v in q_pat if v is not None]
+
+            if not price and not pe: continue
             return {
-                "company_name": company_name, "sector": sector, "industry": sector,
-                "description": "", "website": "", "employees": None,
-                "current_price": current_price, "price_change_pct": None,
-                "market_cap": mc_cr * 1e7 if mc_cr else None,
-                "52w_high": w52h, "52w_low": w52l, "avg_volume": None,
-                "pe_ratio": pe, "pb_ratio": pb, "ev_ebitda": ev_ebitda, "ev_revenue": None,
-                "peg_ratio": None, "book_value": book_value,
-                "roe": roe, "roa": None, "roce": roce, "debt_to_equity": de,
-                "operating_margins": opm, "net_margins": npm,
-                "revenue_growth": None, "earnings_growth": None,
-                "current_ratio": cr, "quick_ratio": None, "interest_coverage": None,
-                "dividend_yield": dy, "eps": eps, "beta": None, "fcf": None,
-                "revenue": revenue, "ebitda": ebitda,
-                "promoter_holding": ph, "institutional_holding": None,
-                "analyst_recommendation": None, "target_price": None, "num_analysts": None,
-                "quarterly_revenue": [], "quarterly_profit": [],
-                "annual_revenue": [], "annual_profit": [],
-                "pros": pros, "cons": cons,
+                "company_name":name,"sector":sector_for(symbol,sect),"industry":sect,
+                "description":"","website":"","employees":None,
+                "current_price":price,"price_change_pct":None,
+                "market_cap":mc_cr*1e7 if mc_cr else None,
+                "52w_high":w52h,"52w_low":w52l,"avg_volume":None,
+                "pe_ratio":pe,"pb_ratio":pb,"ev_ebitda":ev_ebitda,"ev_revenue":None,
+                "peg_ratio":None,"book_value":bv,
+                "roe":roe,"roa":None,"roce":roce,"debt_to_equity":de,
+                "operating_margins":opm,"net_margins":npm,
+                "revenue_growth":None,"earnings_growth":None,
+                "current_ratio":cr,"quick_ratio":None,"interest_coverage":ic,
+                "dividend_yield":dy,"eps":eps,"beta":None,
+                "revenue":revenue,"ebitda":ebitda,"fcf":fcf,
+                "promoter_holding":ph,"promoter_pledge":pledge,"institutional_holding":None,
+                "analyst_recommendation":None,"target_price":None,"num_analysts":None,
+                "quarterly_revenue":q_rev[:8],"quarterly_profit":q_pat[:8],
+                "annual_revenue":[],"annual_profit":[],
+                "pros":pros,"cons":cons,"data_source":"screener",
             }
         except Exception as e:
-            print(f"  Screener fallback error {symbol}: {e}")
-            continue
+            print(f"  screener {symbol}: {e}"); continue
     return {}
 
 
-def fetch_stock_data(symbol: str) -> dict:
-    """Merge yfinance + screener data for completeness."""
-    yf_data = fetch_yfinance(symbol)
-    sc_data = fetch_screener_fallback(symbol)
-    
-    if not yf_data and not sc_data:
-        return {}
-    
-    if not yf_data:
-        sc_data["data_source"] = "screener"
-        return sc_data
-    
-    if not sc_data:
-        yf_data["data_source"] = "yfinance"
-        return yf_data
-    
-    # Merge: yfinance is primary, screener fills gaps
-    merged = dict(yf_data)
-    merged["data_source"] = "merged"
-    # Apply hardcoded sector as fallback
-    merged["sector"] = get_sector_for_symbol(symbol, merged.get("sector", "Unknown"))
-    
-    # Fill ALL missing fields from screener
-    for field in sc_data:
-        yf_val = merged.get(field)
-        sc_val = sc_data.get(field)
-        if (yf_val is None or yf_val == [] or yf_val == "") and sc_val not in (None, [], ""):
-            merged[field] = sc_val
-    
-    # Special: compute ebitda if missing
-    if not merged.get("ebitda") and merged.get("revenue") and merged.get("operating_margins"):
-        merged["ebitda"] = merged["revenue"] * merged["operating_margins"]
-    
-    # Special: compute ev_ebitda if missing  
-    if not merged.get("ev_ebitda") and merged.get("market_cap") and merged.get("ebitda") and merged["ebitda"] > 0:
-        merged["ev_ebitda"] = merged["market_cap"] / merged["ebitda"]
-    
-    # Also override sector if yfinance gave generic sector
-    if sc_data.get("sector") and sc_data["sector"] != "Unknown":
-        merged["sector"] = sc_data["sector"]
-    
-    # Use screener OPM if yfinance OPM is missing
-    if not merged.get("operating_margins") and sc_data.get("operating_margins"):
-        merged["operating_margins"] = sc_data["operating_margins"]
-    
-    return merged
-
-
-# ─── Sector averages ──────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTOR AVERAGES — computed from cached stocks using medians
+# ═══════════════════════════════════════════════════════════════════════════════
 def compute_sector_averages(cache: dict) -> dict:
-    sector_data = {}
-    for entry in cache.values():
-        sector = entry.get("sector", "Unknown")
-        if sector in ("Unknown", None): continue
-        if sector not in sector_data:
-            sector_data[sector] = {"pe": [], "pb": [], "roe": [], "roce": [], "opm": [], "de": [], "ev_ebitda": [], "rev_growth": [], "npm": []}
-        for key, field in [("pe","pe_ratio"),("pb","pb_ratio"),("roe","roe"),("roce","roce"),
-                           ("opm","operating_margins"),("de","debt_to_equity"),
-                           ("ev_ebitda","ev_ebitda"),("rev_growth","revenue_growth"),("npm","net_margins")]:
-            v = entry.get(field)
-            if v is not None and not (isinstance(v, float) and (v != v)):  # not NaN
-                sector_data[sector][key].append(v)
-
-    averages = {}
-    for sector, data in sector_data.items():
-        averages[sector] = {}
-        for metric, values in data.items():
-            if len(values) >= 3:
-                sorted_vals = sorted(values)
-                n = len(sorted_vals)
-                averages[sector][metric] = sorted_vals[n//2]  # median
-    return averages
-
-
-def get_sector_comparison(stock: dict, sector_avgs: dict) -> dict:
-    symbol = stock.get("symbol", "")
-    sector = stock.get("sector", "Unknown")
-    # Use hardcoded map if sector is Unknown
-    if sector == "Unknown" and symbol in NSE_SECTOR_MAP:
-        sector = NSE_SECTOR_MAP[symbol]
-    avgs = sector_avgs.get(sector, {})
-    if not avgs: return {}
+    data = {}
+    for sym,s in cache.items():
+        sec = s.get("sector","Unknown")
+        if sec in ("Unknown","",None): sec = sector_for(sym,"Unknown")
+        if sec in ("Unknown","",None): continue
+        if sec not in data: data[sec]={k:[] for k in ["pe","pb","roe","roce","opm","npm","de","cr","ev_ebitda"]}
+        for k,f in [("pe","pe_ratio"),("pb","pb_ratio"),("roe","roe"),("roce","roce"),
+                    ("opm","operating_margins"),("npm","net_margins"),("de","debt_to_equity"),
+                    ("cr","current_ratio"),("ev_ebitda","ev_ebitda")]:
+            v = s.get(f)
+            if v is not None and isinstance(v,(int,float)) and v==v and not (v!=v):
+                data[sec][k].append(v)
     result = {}
-    mapping = {
-        "pe_ratio": ("pe", True),
-        "pb_ratio": ("pb", True),
-        "roe": ("roe", False),
-        "roce": ("roce", False),
-        "operating_margins": ("opm", False),
-        "debt_to_equity": ("de", True),
-        "ev_ebitda": ("ev_ebitda", True),
-        "revenue_growth": ("rev_growth", False),
-        "net_margins": ("npm", False),
-    }
-    for stock_key, (avg_key, lower_better) in mapping.items():
-        sv = stock.get(stock_key)
-        av = avgs.get(avg_key)
-        if sv is None or av is None or av == 0: continue
-        diff_pct = ((sv - av) / abs(av)) * 100
-        if lower_better:
-            status = "better" if sv < av * 0.9 else ("worse" if sv > av * 1.1 else "inline")
-        else:
-            status = "better" if sv > av * 1.05 else ("worse" if sv < av * 0.9 else "inline")
-        result[stock_key] = {
-            "value": sv, "sector_avg": av,
-            "diff_pct": round(diff_pct, 1), "status": status,
-            "lower_better": lower_better,
-        }
+    for sec,metrics in data.items():
+        result[sec]={}
+        for k,vals in metrics.items():
+            if len(vals)>=2:
+                sv=sorted(vals); n=len(sv)
+                result[sec][k]=sv[n//2]  # median
     return result
 
+def get_sector_comp(stock: dict, avgs: dict) -> dict:
+    sym = stock.get("symbol","")
+    sec = stock.get("sector","Unknown")
+    if sec in ("Unknown","",None): sec = sector_for(sym,"Unknown")
+    sa = avgs.get(sec,{})
+    if not sa: return {}
+    result = {}
+    for sf,ak,lb in [("pe_ratio","pe",True),("pb_ratio","pb",True),
+                     ("roe","roe",False),("roce","roce",False),
+                     ("operating_margins","opm",False),("net_margins","npm",False),
+                     ("debt_to_equity","de",True),("current_ratio","cr",False),
+                     ("ev_ebitda","ev_ebitda",True)]:
+        sv=stock.get(sf); av=sa.get(ak)
+        if sv is None or av is None or av==0: continue
+        diff=((sv-av)/abs(av))*100
+        if lb: status="better" if sv<av*0.9 else ("worse" if sv>av*1.1 else "inline")
+        else:  status="better" if sv>av*1.05 else ("worse" if sv<av*0.9 else "inline")
+        result[sf]={"value":sv,"sector_avg":round(av,3),"diff_pct":round(diff,1),"status":status,"lower_better":lb}
+    return result
 
-# ─── Sector-relative scoring (5 dimensions) ──────────────────────────────────
-def score_stock(d: dict, sector_avgs: dict) -> dict:
-    sector = d.get("sector", "Unknown")
-    symbol = d.get("symbol", "")
-    if sector == "Unknown" and symbol in NSE_SECTOR_MAP:
-        sector = NSE_SECTOR_MAP[symbol]
-    avgs = sector_avgs.get(sector, {})
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCORING — 5 dimensions, sector-relative with absolute fallbacks
+# ═══════════════════════════════════════════════════════════════════════════════
+def ath(val, thresholds, hi=True):
+    if val is None: return None
+    if hi:
+        for t,s in thresholds:
+            if val>=t: return s
+        return thresholds[-1][1]
+    else:
+        for t,s in thresholds:
+            if val<=t: return s
+        return thresholds[-1][1]
 
-    def pct(v): return v * 100 if v is not None else None
-    def vs_sector(val, avg_key, higher_better=True, weight=1.0):
-        """Score 0-100 based on how stock compares to sector median."""
-        if val is None: return 0
-        avg = avgs.get(avg_key)
-        if avg is None or avg == 0:
-            # No sector data - use absolute thresholds
-            if avg_key == "roe":
-                if val >= 0.25: return 85
-                if val >= 0.18: return 70
-                if val >= 0.12: return 50
-                return 30
-            elif avg_key == "roce":
-                if val >= 0.25: return 85
-                if val >= 0.18: return 70
-                if val >= 0.12: return 50
-                return 30
-            elif avg_key == "opm":
-                if val >= 0.25: return 85
-                if val >= 0.15: return 65
-                if val >= 0.08: return 45
-                return 25
-            elif avg_key == "de":
-                if val < 0.1: return 90
-                if val < 0.3: return 75
-                if val < 0.7: return 50
-                return 25
-            elif avg_key == "pe":
-                if val < 12: return 85
-                if val < 20: return 65
-                if val < 30: return 45
-                return 25
-            elif avg_key == "npm":
-                if val >= 0.15: return 80
-                if val >= 0.08: return 60
-                return 35
-            return 50  # true neutral for unknown metrics
-        ratio = val / avg
-        if higher_better:
-            if ratio >= 2.0: return 100 * weight
-            if ratio >= 1.5: return 85 * weight
-            if ratio >= 1.2: return 70 * weight
-            if ratio >= 1.0: return 55 * weight
-            if ratio >= 0.8: return 35 * weight
-            return 15 * weight
-        else:  # lower is better
-            if ratio <= 0.5: return 100 * weight
-            if ratio <= 0.7: return 85 * weight
-            if ratio <= 0.9: return 70 * weight
-            if ratio <= 1.1: return 55 * weight
-            if ratio <= 1.3: return 35 * weight
-            return 15 * weight
+def score_stock(d: dict, avgs: dict) -> dict:
+    sym=d.get("symbol",""); sec=d.get("sector","Unknown")
+    if sec in ("Unknown","",None): sec=sector_for(sym,"Unknown")
+    sa=avgs.get(sec,{})
 
-    roe = d.get("roe"); roce = d.get("roce"); opm = d.get("operating_margins")
-    npm = d.get("net_margins"); de = d.get("debt_to_equity")
-    pe = d.get("pe_ratio"); pb = d.get("pb_ratio")
-    rev_growth = d.get("revenue_growth"); earn_growth = d.get("earnings_growth")
-    current_ratio = d.get("current_ratio"); ic = d.get("interest_coverage")
-    fcf = d.get("fcf"); ev_ebitda = d.get("ev_ebitda")
-    peg = d.get("peg_ratio"); price = d.get("current_price")
-    high = d.get("52w_high"); dy = d.get("dividend_yield")
-    mc = (d.get("market_cap") or 0) / 1e7
+    def p(v): return v*100 if v is not None else None
+    def vs(val,key,hi=True):
+        if val is None: return None
+        avg=sa.get(key)
+        if not avg or avg==0: return None
+        r=val/avg
+        if hi:
+            if r>=2.0: return 95
+            if r>=1.5: return 82
+            if r>=1.2: return 68
+            if r>=1.0: return 54
+            if r>=0.8: return 38
+            return 20
+        else:
+            if r<=0.4: return 95
+            if r<=0.6: return 82
+            if r<=0.8: return 68
+            if r<=1.0: return 54
+            if r<=1.3: return 38
+            return 20
 
-    reasons = []
+    roe=d.get("roe"); roce=d.get("roce"); opm=d.get("operating_margins")
+    npm=d.get("net_margins"); de=d.get("debt_to_equity"); cr=d.get("current_ratio")
+    pe=d.get("pe_ratio"); pb=d.get("pb_ratio"); rev_g=d.get("revenue_growth")
+    earn_g=d.get("earnings_growth"); price=d.get("current_price")
+    high=d.get("52w_high"); low=d.get("52w_low"); ic=d.get("interest_coverage")
+    reasons=[]
 
-    # ── 1. QUALITY (30%) ──────────────────────────────────────────────────────
-    q_score = 0
-    # ROE vs sector
-    roe_s = vs_sector(roe, "roe", True)
-    q_score += roe_s * 0.35
-    if roe and pct(roe) >= 20: reasons.append(f"Strong ROE {pct(roe):.1f}%")
-    elif roe and pct(roe) >= 15: reasons.append(f"Good ROE {pct(roe):.1f}%")
+    # QUALITY (30%)
+    q_parts=[]; q_weights=[]
+    if roe is not None:
+        s=vs(roe,"roe",True) or ath(p(roe),[(30,95),(25,85),(20,72),(15,58),(10,40),(5,25)])
+        q_parts.append(s); q_weights.append(0.40)
+        if p(roe)>=25: reasons.append(f"Exceptional ROE {p(roe):.1f}%")
+        elif p(roe)>=18: reasons.append(f"Strong ROE {p(roe):.1f}%")
+    if roce is not None:
+        s=vs(roce,"roce",True) or ath(p(roce),[(30,95),(25,85),(20,72),(15,58),(10,40)])
+        q_parts.append(s); q_weights.append(0.35)
+        if p(roce)>=25: reasons.append(f"Exceptional ROCE {p(roce):.1f}%")
+        elif p(roce)>=18: reasons.append(f"High ROCE {p(roce):.1f}%")
+    if opm is not None:
+        s=vs(opm,"opm",True) or ath(p(opm),[(30,90),(20,75),(15,60),(8,42),(3,25)])
+        q_parts.append(s); q_weights.append(0.25)
+        if p(opm)>=25: reasons.append(f"Wide margins OPM {p(opm):.1f}%")
+        elif p(opm)>=15: reasons.append(f"Strong margins OPM {p(opm):.1f}%")
+    elif npm is not None:
+        s=vs(npm,"npm",True) or ath(p(npm),[(20,85),(12,68),(8,52),(4,35)])
+        q_parts.append(s); q_weights.append(0.25)
+    if not q_parts: Q=45
+    else:
+        tw=sum(q_weights[:len(q_parts)])
+        Q=min(sum(q_parts[i]*q_weights[i] for i in range(len(q_parts)))/tw,100)
 
-    # ROCE vs sector
-    roce_s = vs_sector(roce, "roce", True)
-    q_score += roce_s * 0.35
-    if roce and pct(roce) >= 20: reasons.append(f"High ROCE {pct(roce):.1f}%")
+    # GROWTH (25%)
+    g_parts=[]
+    if rev_g is not None:
+        rg=p(rev_g)
+        if rg>=30: g_parts.append(95); reasons.append(f"Revenue surging {rg:.1f}%")
+        elif rg>=20: g_parts.append(82); reasons.append(f"Revenue growing {rg:.1f}%")
+        elif rg>=12: g_parts.append(65)
+        elif rg>=5: g_parts.append(48)
+        elif rg>=0: g_parts.append(32)
+        else: g_parts.append(15)
+    if earn_g is not None:
+        eg=p(earn_g)
+        if eg>=30: g_parts.append(95); reasons.append(f"Earnings surging {eg:.1f}%")
+        elif eg>=20: g_parts.append(82)
+        elif eg>=10: g_parts.append(65)
+        elif eg>=0: g_parts.append(40)
+        else: g_parts.append(15)
+    if not g_parts:
+        if roe and p(roe)>=25: G=62; reasons.append("High ROE signals reinvestment capacity")
+        elif roe and p(roe)>=18: G=52
+        else: G=40
+    else: G=min(sum(g_parts)/len(g_parts),100)
 
-    # OPM vs sector
-    opm_s = vs_sector(opm, "opm", True)
-    q_score += opm_s * 0.30
-    if opm and pct(opm) >= 20: reasons.append(f"Strong margins {pct(opm):.1f}%")
-    q_total = min(q_score, 100)
-
-    # ── 2. GROWTH (25%) ───────────────────────────────────────────────────────
-    g_score = 0
-    g_has_data = False
-    if rev_growth is not None:
-        g_has_data = True
-        rg_pct = pct(rev_growth)
-        if rg_pct >= 25: g_score += 40; reasons.append(f"Revenue growing {rg_pct:.1f}%")
-        elif rg_pct >= 15: g_score += 30; reasons.append(f"Revenue growing {rg_pct:.1f}%")
-        elif rg_pct >= 8: g_score += 22
-        elif rg_pct >= 0: g_score += 14
-        else: g_score += 5
-
-    if earn_growth is not None:
-        g_has_data = True
-        eg_pct = pct(earn_growth)
-        if eg_pct >= 25: g_score += 40; reasons.append(f"Earnings growing {eg_pct:.1f}%")
-        elif eg_pct >= 15: g_score += 30; reasons.append(f"Earnings growing {eg_pct:.1f}%")
-        elif eg_pct >= 8: g_score += 22
-        elif eg_pct >= 0: g_score += 14
-        else: g_score += 5
-
-    # If no growth data available, infer from ROE/ROCE quality
-    # A company with high ROE likely has decent growth
-    if not g_has_data:
-        if roe and pct(roe) >= 25: g_score = 55; reasons.append("High ROE implies growth capability")
-        elif roe and pct(roe) >= 18: g_score = 48
-        elif roe and pct(roe) >= 12: g_score = 40
-        else: g_score = 35  # neutral-ish default
-
-    g_total = min(g_score, 100)
-
-    # ── 3. SAFETY (20%) ───────────────────────────────────────────────────────
-    s_score = 0
-    s_has_data = False
-
+    # SAFETY (20%)
+    s_parts=[]
     if de is not None:
-        s_has_data = True
-        de_s = vs_sector(de, "de", False)
-        s_score += de_s * 0.40
-        if de < 0.1: reasons.append("Near debt-free")
-        elif de < 0.3: reasons.append("Low debt")
-
-    if current_ratio is not None:
-        s_has_data = True
-        if current_ratio >= 2: s_score += 30
-        elif current_ratio >= 1.5: s_score += 22
-        elif current_ratio >= 1: s_score += 14
-        else: s_score += 5
-
+        s2=vs(de,"de",False) or ath(de,[(0,95),(0.1,90),(0.3,75),(0.7,55),(1.5,35),(3,18)],hi=False)
+        s_parts.append(s2)
+        if de<0.1: reasons.append("Near debt-free")
+        elif de<0.3: reasons.append(f"Low debt D/E {de:.2f}x")
+    if cr is not None:
+        if cr>=2.5: s_parts.append(88)
+        elif cr>=2.0: s_parts.append(75)
+        elif cr>=1.5: s_parts.append(60)
+        elif cr>=1.0: s_parts.append(42)
+        else: s_parts.append(18)
     if ic is not None:
-        s_has_data = True
-        if ic >= 5: s_score += 30
-        elif ic >= 3: s_score += 22
-        elif ic >= 1.5: s_score += 12
-        else: s_score += 5
-    elif de is not None and de < 0.1:
-        s_score += 25
+        if ic>=8: s_parts.append(90)
+        elif ic>=5: s_parts.append(75)
+        elif ic>=3: s_parts.append(55)
+        elif ic>=1.5: s_parts.append(35)
+        else: s_parts.append(15)
+    if not s_parts:
+        pros_t=" ".join(d.get("pros",[])).lower(); cons_t=" ".join(d.get("cons",[])).lower()
+        if "debt free" in pros_t or "zero debt" in pros_t: S=75; reasons.append("Debt-free")
+        elif "debt" in cons_t or "leverage" in cons_t: S=28
+        elif roce and p(roce)>20: S=58
+        else: S=45
+    else: S=min(sum(s_parts)/len(s_parts),100)
 
-    # If no safety data, use pros/cons text as proxy
-    if not s_has_data:
-        pros_text = " ".join(d.get("pros", [])).lower()
-        cons_text = " ".join(d.get("cons", [])).lower()
-        if "debt free" in pros_text or "zero debt" in pros_text:
-            s_score = 70; reasons.append("Debt-free (from fundamentals)")
-        elif "debt" in cons_text or "leverage" in cons_text:
-            s_score = 30
-        else:
-            s_score = 50  # neutral when no data
+    # VALUE (15%)
+    v_parts=[]
+    if pe and pe>0:
+        s3=vs(pe,"pe",False) or ath(pe,[(0,90),(10,80),(15,68),(20,55),(30,40),(50,22),(100,10)],hi=False)
+        v_parts.append(s3)
+        if pe<15: reasons.append(f"Attractive P/E {pe:.1f}x")
+    if pb and pb>0:
+        s4=vs(pb,"pb",False) or ath(pb,[(0,90),(1,80),(1.5,68),(3,50),(5,35),(10,20)],hi=False)
+        v_parts.append(s4)
+    if price and high and high>0:
+        pf=((high-price)/high)*100
+        if pf>=40: v_parts.append(85); reasons.append(f"{pf:.0f}% below 52W high")
+        elif pf>=25: v_parts.append(70)
+        elif pf>=10: v_parts.append(55)
+        else: v_parts.append(35)
+    V=min(sum(v_parts)/len(v_parts),100) if v_parts else 45
 
-    s_total = min(s_score, 100)
+    # MOMENTUM (10%)
+    if price and high and high>0 and low and high>low:
+        pos=((price-low)/(high-low))*100
+        if pos>=80: M=85
+        elif pos>=60: M=70
+        elif pos>=40: M=55
+        elif pos>=20: M=40
+        else: M=25
+    elif price and high and high>0:
+        pf2=((high-price)/high)*100
+        M=max(20,80-pf2*1.5)
+    else: M=45
 
-    # ── 4. VALUE (15%) ────────────────────────────────────────────────────────
-    v_score = 0
-    pe_s = vs_sector(pe, "pe", False) if pe else 50
-    v_score += pe_s * 0.40
-
-    pb_s = vs_sector(pb, "pb", False) if pb else 50
-    v_score += pb_s * 0.30
-
-    if price and high and high > 0:
-        pct_off = ((high - price) / high) * 100
-        if pct_off >= 30: v_score += 30; reasons.append(f"{pct_off:.0f}% below 52w high")
-        elif pct_off >= 15: v_score += 20
-        elif pct_off >= 5: v_score += 10
-        else: v_score += 5
-
-    if pe and pe > 0 and pe < 15: reasons.append(f"Attractive P/E {pe:.1f}x")
-    v_total = min(v_score, 100)
-
-    # ── 5. MOMENTUM (10%) ─────────────────────────────────────────────────────
-    m_score = 50  # neutral default
-    if price and high and high > 0:
-        pct_from_high = ((high - price) / high) * 100
-        low = d.get("52w_low")
-        if low and high > low:
-            price_range_pct = ((price - low) / (high - low) * 100)
-            if price_range_pct >= 80: m_score = 85
-            elif price_range_pct >= 60: m_score = 70
-            elif price_range_pct >= 40: m_score = 55
-            elif price_range_pct >= 20: m_score = 40
-            else: m_score = 28
-        else:
-            # Just use distance from 52w high
-            if pct_from_high <= 5: m_score = 75
-            elif pct_from_high <= 15: m_score = 60
-            elif pct_from_high <= 30: m_score = 45
-            else: m_score = 32
-    m_total = min(m_score, 100)
-
-    # ── Composite ─────────────────────────────────────────────────────────────
-    composite = round(
-        q_total * 0.30 +
-        g_total * 0.25 +
-        s_total * 0.20 +
-        v_total * 0.15 +
-        m_total * 0.10, 1
-    )
-
+    def cl(x): return max(0,min(100,round(x)))
+    Q=cl(Q); G=cl(G); S=cl(S); V=cl(V); M=cl(M)
+    comp=cl(Q*0.30+G*0.25+S*0.20+V*0.15+M*0.10)
     return {
-        "composite": composite,
-        "scores": {
-            "quality": round(q_total),
-            "growth": round(g_total),
-            "safety": round(s_total),
-            "value": round(v_total),
-            "momentum": round(m_total),
-        },
-        "sub_scores": [
-            {"label": "Quality", "score": round(q_total)},
-            {"label": "Growth", "score": round(g_total)},
-            {"label": "Safety", "score": round(s_total)},
-            {"label": "Value", "score": round(v_total)},
-            {"label": "Momentum", "score": round(m_total)},
+        "composite":comp,
+        "scores":{"quality":Q,"growth":G,"safety":S,"value":V,"momentum":M},
+        "sub_scores":[
+            {"label":"Quality","score":Q,"weight":"30%"},{"label":"Growth","score":G,"weight":"25%"},
+            {"label":"Safety","score":S,"weight":"20%"},{"label":"Value","score":V,"weight":"15%"},
+            {"label":"Momentum","score":M,"weight":"10%"},
         ],
-        "top_reasons": list(dict.fromkeys(reasons))[:5],
-        "sector_relative": True,
+        "top_reasons":list(dict.fromkeys(reasons))[:5],
+        "sector":sec,"sector_relative":bool(sa),
     }
 
-
-def conviction_tier(score):
-    if score >= 72: return "Strong Buy"
-    if score >= 58: return "Buy"
-    if score >= 42: return "Watch"
-    if score >= 28: return "Neutral"
+def conviction(score):
+    if score>=72: return "Strong Buy"
+    if score>=58: return "Buy"
+    if score>=42: return "Watch"
+    if score>=28: return "Neutral"
     return "Avoid"
 
 
-# ─── Investor profiles ────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# 29 INVESTOR PROFILES — Deep researched criteria
+# ═══════════════════════════════════════════════════════════════════════════════
 INVESTOR_PROFILES = {
-    "rj": {
-        "name": "Rakesh Jhunjhunwala", "avatar": "RJ", "category": "Indian Legend",
-        "focus": "India Growth Compounder", "color": "#f59e0b",
-        "portfolio_size": 18, "sizing_style": "conviction_weighted",
-        "bio": "Known as India's Warren Buffett and the 'Big Bull', Rakesh Jhunjhunwala (1960-2022) turned Rs 5,000 into over Rs 40,000 crore through a legendary 35-year career. He started trading in 1985 with borrowed money.",
-        "philosophy": "Jhunjhunwala believed passionately in India's economic growth story. His mantra was 'Buy right, sit tight' — he held Titan for over 20 years and never sold.",
-        "what_he_looked_for": "High ROE businesses (>20%), strong promoter conviction (>50% holding), large addressable market, India-specific growth story, reasonable valuation.",
-        "what_he_avoided": "Commodity businesses, high debt companies, businesses without pricing power, promoters with poor track record.",
-        "famous_investments": ["Titan Company", "Star Health Insurance", "Crisil", "Lupin", "Aptech"],
-        "signature_quote": "I am bullish on India. I think we are going to have a great bull market.",
-        "rebalance_style": "Held for decades. Only exited when fundamental thesis broke.",
-        "description": "High ROE compounders, India growth story, high promoter conviction",
-    },
-    "buffett": {
-        "name": "Warren Buffett", "avatar": "WB", "category": "Global Legend",
-        "focus": "Quality at Fair Price", "color": "#3b82f6",
-        "portfolio_size": 10, "sizing_style": "very_concentrated",
-        "bio": "Warren Buffett, the Oracle of Omaha, is widely considered the greatest investor of all time. His Berkshire Hathaway has compounded at ~20% CAGR for 58 years.",
-        "philosophy": "Buy wonderful businesses at fair prices and hold forever. A wonderful business has durable competitive advantages, consistent high ROE without leverage, strong management.",
-        "what_he_looked_for": "ROE > 20% consistently, low debt, pricing power, brand moat, simple understandable business, honest management.",
-        "what_he_avoided": "Businesses he cannot understand, highly leveraged companies, commodity businesses without pricing power.",
-        "famous_investments": ["Coca-Cola", "American Express", "Apple", "GEICO", "Bank of America"],
-        "signature_quote": "It is far better to buy a wonderful company at a fair price than a fair company at a wonderful price.",
-        "rebalance_style": "Favourite holding period is forever.",
-        "description": "Durable moat, consistent high ROE, low debt, buy below intrinsic value",
-    },
-    "marcellus": {
-        "name": "Marcellus (Saurabh Mukherjea)", "avatar": "MC", "category": "Indian Fund",
-        "focus": "Forensic Quality Only", "color": "#06b6d4",
-        "portfolio_size": 12, "sizing_style": "equal_weight",
-        "bio": "Saurabh Mukherjea founded Marcellus Investment Managers in 2018. His Consistent Compounders Portfolio uses forensic accounting screens to identify companies with clean books and consistently high ROCE.",
-        "philosophy": "The best investments are businesses with virtually zero debt, ROCE consistently above 25%, and clean accounting. Most Indian businesses fail the forensic screen.",
-        "what_he_looked_for": "Zero debt, ROCE > 25% for 10 consecutive years, clean accounting, consistent margins.",
-        "what_he_avoided": "Any leverage, aggressive accounting, related-party transactions, promoter pledge.",
-        "famous_investments": ["Asian Paints", "HDFC Bank", "Pidilite Industries", "Nestle India"],
-        "signature_quote": "Great businesses destroy the competition slowly and surely.",
-        "rebalance_style": "Annual April rebalance. Replaces bottom 2-3 performers.",
-        "description": "Zero debt, very high ROCE, clean accounts, forensic quality filter",
-    },
-    "vijay_kedia": {
-        "name": "Vijay Kedia", "avatar": "VK", "category": "Indian Legend",
-        "focus": "SMILE — Niche Leaders", "color": "#8b5cf6",
-        "portfolio_size": 6, "sizing_style": "very_concentrated",
-        "bio": "Vijay Kedia started investing with Rs 25,000 and built a multi-hundred crore portfolio through highly concentrated bets on niche market leaders. Known for his SMILE framework.",
-        "philosophy": "SMILE: Small in size, Medium in experience, Large in aspiration, Extra-large in market potential. Niche monopolies in industries most investors ignore.",
-        "what_he_looked_for": "Small/mid cap niche leadership, management with 10+ years execution, large untapped addressable market, high promoter stake (>50%).",
-        "what_he_avoided": "Large cap stocks, commodity businesses, companies with poor management pedigree.",
-        "famous_investments": ["Atul Auto", "Aegis Logistics", "Cera Sanitaryware", "Tejas Networks"],
-        "signature_quote": "If you pick the right business and right management, you do not need to time the market.",
-        "rebalance_style": "Ultra long term. Holds 5-10 years.",
-        "description": "SMILE framework — niche monopolies, large opportunity, high promoter stake",
-    },
-    "parag_parikh": {
-        "name": "Parag Parikh Flexi Cap", "avatar": "PP", "category": "Indian Fund",
-        "focus": "Owner-Operator Quality", "color": "#10b981",
-        "portfolio_size": 22, "sizing_style": "equal_weight",
-        "bio": "PPFAS manages one of India's most respected mutual funds. Known for low churn, behavioral investing approach, and willingness to hold cash when markets are overvalued.",
-        "philosophy": "Invest in businesses run by owner-operators with skin in the game. Focus on pricing power, durable competitive advantages, and behavioral discipline.",
-        "what_he_looked_for": "Owner-operators (>30% promoter), pricing power (OPM > 15%), low debt, consistent ROE.",
-        "what_he_avoided": "Highly valued momentum stocks, businesses without pricing power, high leverage.",
-        "famous_investments": ["HDFC Bank", "Bajaj Holdings", "ITC", "Coal India"],
-        "signature_quote": "We buy businesses, not stocks.",
-        "rebalance_style": "Semi-annual formal review. Low turnover.",
-        "description": "Pricing power, owner-operator promoters, behavioral discipline",
-    },
-    "porinju": {
-        "name": "Porinju Veliyath", "avatar": "PV", "category": "Indian Legend",
-        "focus": "Smallcap Contrarian", "color": "#ec4899",
-        "portfolio_size": 25, "sizing_style": "equal_weight",
-        "bio": "Porinju Veliyath, founder of Equity Intelligence India, is known as the Smallcap King. Built a fund delivering exceptional returns by investing in deeply undervalued small caps.",
-        "philosophy": "Find small companies that are fundamentally sound but completely ignored by institutional investors. The lack of coverage creates mispricing opportunities.",
-        "what_he_looked_for": "Market cap under Rs 2,000 Cr, beaten-down prices, strong fundamentals despite temporary headwinds, honest management.",
-        "what_he_avoided": "Large caps (too efficient), businesses with permanent structural problems.",
-        "famous_investments": ["Geojit Financial", "Wonderla Holidays", "V-Guard Industries"],
-        "signature_quote": "Markets are not efficient in the small cap space. That is where the opportunity lies.",
-        "rebalance_style": "Event-driven. Exits when the turnaround thesis plays out.",
-        "description": "Deep smallcap, turnaround stories, beaten-down stocks",
-    },
-    "ben_graham": {
-        "name": "Benjamin Graham", "avatar": "BG", "category": "Global Legend",
-        "focus": "Deep Value / Margin of Safety", "color": "#64748b",
-        "portfolio_size": 25, "sizing_style": "equal_weight",
-        "bio": "Benjamin Graham, Father of Value Investing, wrote The Intelligent Investor. Warren Buffett called him the second most influential person in his life.",
-        "philosophy": "Always buy with a significant margin of safety. Never overpay. Treat stocks as ownership in real businesses. Be the rational investor when others are emotional.",
-        "what_he_looked_for": "P/B below 1.5, P/E below 15, low debt, positive earnings for 10 years, dividend payments.",
-        "what_he_avoided": "Speculative stocks, growth stocks at premium valuations, poor balance sheets.",
-        "famous_investments": ["GEICO (bought at extreme discount)", "Northern Pipeline"],
-        "signature_quote": "The margin of safety is always dependent on the price paid.",
-        "rebalance_style": "Annual rebalance. Systematic rules-based approach.",
-        "description": "Buy below book value, wide margin of safety, absolute value",
-    },
-    "peter_lynch": {
-        "name": "Peter Lynch", "avatar": "PL", "category": "Global Legend",
-        "focus": "GARP — Growth at Reasonable Price", "color": "#06b6d4",
-        "portfolio_size": 30, "sizing_style": "equal_weight",
-        "bio": "Peter Lynch managed Fidelity's Magellan Fund achieving 29.2% annual returns — the best 13-year run of any mutual fund in history.",
-        "philosophy": "Invest in companies you understand from daily life. Use PEG ratio to find growth at reasonable price. A PEG below 1 means you are getting growth cheap.",
-        "what_he_looked_for": "PEG ratio < 1, companies growing earnings > 20%, businesses he could explain in 2 minutes.",
-        "what_he_avoided": "Businesses he did not understand, hot industries with heavy competition.",
-        "famous_investments": ["Dunkin Donuts", "Taco Bell", "Subaru"],
-        "signature_quote": "Invest in what you know.",
-        "rebalance_style": "Quarterly review. High turnover acceptable.",
-        "description": "PEG ratio focus, invest in what you know, hidden gems in boring sectors",
-    },
-    "charlie_munger": {
-        "name": "Charlie Munger", "avatar": "CM", "category": "Global Legend",
-        "focus": "Wonderful Company at Fair Price", "color": "#0ea5e9",
-        "portfolio_size": 5, "sizing_style": "very_concentrated",
-        "bio": "Charlie Munger, Buffett's partner at Berkshire Hathaway for 60 years, transformed Buffett from a Graham-style deep value investor to a quality compounder investor.",
-        "philosophy": "A few wonderful businesses held forever beats a hundred mediocre ones traded frequently. Look for businesses with durable competitive moats and pricing power.",
-        "what_he_looked_for": "ROCE > 25%, pricing power, durable moat (brand, network effect, switching costs), honest management.",
-        "what_he_avoided": "Complex businesses, commodity businesses, management that speaks in jargon.",
-        "famous_investments": ["BYD", "Berkshire investments alongside Buffett"],
-        "signature_quote": "I have nothing to add.",
-        "rebalance_style": "Ultra-long term. Very rare portfolio changes.",
-        "description": "Ultra-concentrated wonderful companies, ROCE focus, hold forever",
-    },
-    "ashish_kacholia": {
-        "name": "Ashish Kacholia", "avatar": "AK", "category": "Indian Legend",
-        "focus": "Emerging Compounders", "color": "#84cc16",
-        "portfolio_size": 20, "sizing_style": "equal_weight",
-        "bio": "Ashish Kacholia, often called the Big Whale of smallcap investing, is known for identifying emerging compounders before they become mainstream.",
-        "philosophy": "Look for scalable business models in smallcap space with high ROE, strong management, and a large runway for growth.",
-        "what_he_looked_for": "Smallcap companies (Rs 500-5000 Cr), high ROE (>20%), scalable business model, good management.",
-        "what_he_avoided": "Loss-making companies, high debt, promoters with integrity concerns.",
-        "famous_investments": ["Wonderla Holidays", "Repco Home Finance", "Safari Industries"],
-        "signature_quote": "I look for businesses that can become 10x in 7-10 years.",
-        "rebalance_style": "Annual review. Replaces underperformers.",
-        "description": "Smallcap quality growth, scalable businesses, emerging sector leaders",
-    },
-    "motilal_qglp": {
-        "name": "Motilal Oswal QGLP", "avatar": "MO", "category": "Indian Fund",
-        "focus": "Quality + Growth + Longevity + Price", "color": "#f97316",
-        "portfolio_size": 20, "sizing_style": "conviction_weighted",
-        "bio": "Motilal Oswal Asset Management applies the QGLP framework pioneered by Raamdeo Agrawal. Refined over 30 years guiding one of India's largest equity PMS businesses.",
-        "philosophy": "All four QGLP pillars must be present: Quality business, Growth in earnings > 20%, Longevity of growth runway 10+ years, Price reasonable (PEG < 1.5).",
-        "what_he_looked_for": "ROE > 20%, earnings growth > 20% consistently, large TAM, PEG under 1.5.",
-        "what_he_avoided": "Low-quality businesses even at cheap valuations, businesses without 10-year earnings visibility.",
-        "famous_investments": ["Eicher Motors", "Page Industries", "Bajaj Finance"],
-        "signature_quote": "Buy right, sit tight.",
-        "rebalance_style": "Annual formal rebalance.",
-        "description": "All four QGLP criteria — quality, growth, longevity, price",
-    },
-    "dolly_khanna": {
-        "name": "Dolly Khanna", "avatar": "DK", "category": "Indian Legend",
-        "focus": "Cyclical Turnarounds", "color": "#f472b6",
-        "portfolio_size": 25, "sizing_style": "equal_weight",
-        "bio": "Dolly Khanna is one of India's most successful retail investors, known for her ability to identify cyclical businesses at turnaround points.",
-        "philosophy": "Find cyclical businesses at the bottom of their cycle. Buy when the sector is hated, hold through the recovery, sell when valuations are stretched.",
-        "what_he_looked_for": "Small caps under Rs 3,000 Cr, cyclical businesses at trough valuations, strong balance sheets to survive the downturn.",
-        "what_he_avoided": "Large caps, businesses with poor balance sheets.",
-        "famous_investments": ["Nilkamal", "Rain Industries", "Thirumalai Chemicals"],
-        "signature_quote": "Buy what others are ignoring. Sell what others are chasing.",
-        "rebalance_style": "Semi-annual. Exits when cyclical recovery is fully priced in.",
-        "description": "Cyclical turnarounds, ignored smallcaps, beaten-down sectors",
-    },
-    "enam": {
-        "name": "Enam / Vallabh Bhansali", "avatar": "EN", "category": "Indian Fund",
-        "focus": "Forensic Long-Term Quality", "color": "#c4b5fd",
-        "portfolio_size": 15, "sizing_style": "conviction_weighted",
-        "bio": "Enam Securities, founded by Vallabh Bhansali and Nemish Shah, is one of India's most respected institutional brokers known for deep fundamental research.",
-        "philosophy": "Management integrity is non-negotiable. Zero tolerance for governance issues. Debt-free businesses with long track records. 10+ year horizon.",
-        "what_he_looked_for": "Management integrity above all, debt-free, consistent 10+ year track record, high ROCE.",
-        "what_he_avoided": "Any management integrity concerns, leveraged businesses.",
-        "famous_investments": ["HDFC Bank", "Infosys", "Asian Paints", "Hero Honda"],
-        "signature_quote": "Management integrity is the first filter. Everything else is secondary.",
-        "rebalance_style": "Very long term. Extremely low turnover.",
-        "description": "Management integrity first, debt-free, forensic accounting",
-    },
-    "white_oak": {
-        "name": "White Oak Capital", "avatar": "WO", "category": "Indian Fund",
-        "focus": "Earnings Quality Growth", "color": "#86efac",
-        "portfolio_size": 30, "sizing_style": "equal_weight",
-        "bio": "Prashant Khemka founded White Oak Capital after a stellar career at Goldman Sachs Asset Management. Focuses on earnings quality and return on equity.",
-        "philosophy": "Earnings quality is the foundation. High, sustainable ROE without leverage. Business quality drives long-term returns.",
-        "what_he_looked_for": "ROE > 20% without leverage, earnings quality (cash conversion), consistent growth.",
-        "what_he_avoided": "Businesses with poor earnings quality, high leverage.",
-        "famous_investments": ["ICICI Bank", "Kotak Bank", "Maruti", "Titan"],
-        "signature_quote": "Earnings quality separates sustainable returns from temporary ones.",
-        "rebalance_style": "Annual rebalance. Equal weight approach.",
-        "description": "Earnings quality, ROE without leverage, Goldman Sachs rigor",
-    },
-    "radhakishan_damani": {
-        "name": "Radhakishan Damani", "avatar": "RKD", "category": "Indian Legend",
-        "focus": "Retail & Consumer Value", "color": "#fb923c",
-        "portfolio_size": 8, "sizing_style": "very_concentrated",
-        "bio": "Radhakishan Damani, founder of DMart and Avenue Supermarts, is one of India's wealthiest individuals. Before DMart he was a legendary investor known for contrarian calls and deep value in the 1990s.",
-        "philosophy": "Extremely concentrated bets on businesses he deeply understands. Prefers consumer-facing businesses with pricing power, everyday essential products, and low-cost operational models.",
-        "what_he_looked_for": "Consumer businesses with durable competitive advantage, low-cost operators, essential products, strong cash flow, owner-operated businesses.",
-        "what_he_avoided": "Capital-intensive businesses, high debt, businesses dependent on advertising, luxury goods.",
-        "famous_investments": ["Avenue Supermarts (DMart)", "VST Industries", "3M India", "United Breweries"],
-        "signature_quote": "Build a business where customers come back every day.",
-        "rebalance_style": "Very long term. Once invested, rarely exits.",
-        "description": "Consumer + retail lens, EDLP businesses, essential products, low debt",
-    },
-    "raamdeo_agrawal": {
-        "name": "Raamdeo Agrawal", "avatar": "RA", "category": "Indian Legend",
-        "focus": "QGLP — Quality Growth", "color": "#60a5fa",
-        "portfolio_size": 20, "sizing_style": "conviction_weighted",
-        "bio": "Raamdeo Agrawal, co-founder of Motilal Oswal Financial Services, developed the QGLP framework that has guided billions in Indian equity investment. He has compounded wealth at over 25% CAGR for over 30 years.",
-        "philosophy": "QGLP: Quality of business and management, Growth in earnings over 20% for 5 years, Longevity of the growth runway 10+ years, Price that is reasonable (PEG below 1.5). All four must align.",
-        "what_he_looked_for": "ROE above 20%, earnings growth above 20% for 5 years, large addressable market, honest management, PE reasonable relative to growth.",
-        "what_he_avoided": "Commodity businesses, high debt, management with integrity issues, businesses with less than 5 year earnings visibility.",
-        "famous_investments": ["Eicher Motors", "Page Industries", "HDFC Bank", "Infosys"],
-        "signature_quote": "Wealth creation is all about owning great businesses for a long period of time.",
-        "rebalance_style": "Annual formal review. Replaces slowest growers.",
-        "description": "QGLP pioneer — Quality + Growth + Longevity + Price framework",
-    },
-    "sanjay_bakshi": {
-        "name": "Sanjay Bakshi", "avatar": "SB", "category": "Indian Legend",
-        "focus": "Behavioral Value Investing", "color": "#818cf8",
-        "portfolio_size": 15, "sizing_style": "conviction_weighted",
-        "bio": "Sanjay Bakshi is a professor at MDI Gurgaon and founder of ValueQuest Capital. A disciple of Ben Graham and Charlie Munger, he brings academic rigor to value investing.",
-        "philosophy": "Combines Graham margin of safety with Munger quality-compounder approach. Heavy emphasis on behavioral finance — buy when others are irrationally fearful. Focuses on moaty businesses at temporary discounts.",
-        "what_he_looked_for": "High-quality businesses at temporary discount, monopolistic characteristics, owner-operators, high ROCE, low debt.",
-        "what_he_avoided": "Businesses he does not deeply understand, highly leveraged companies, businesses without durable competitive advantage.",
-        "famous_investments": ["Relaxo Footwear", "Hawkins Cookers", "La Opala", "Astral Poly"],
-        "signature_quote": "The best time to buy a great business is when it is being given away.",
-        "rebalance_style": "Thesis-based. Patient 3-7 year holds.",
-        "description": "Academic value investing, behavioral finance lens, moaty businesses at discount",
-    },
-    "kenneth_andrade": {
-        "name": "Kenneth Andrade (Old Bridge)", "avatar": "KA", "category": "Indian Legend",
-        "focus": "Asset-Light Capital Efficiency", "color": "#34d399",
-        "portfolio_size": 20, "sizing_style": "equal_weight",
-        "bio": "Kenneth Andrade, founder of Old Bridge Capital, is known for his contrarian asset-light investment philosophy. He ran IDFC Premier Equity Fund before starting Old Bridge, delivering exceptional returns.",
-        "philosophy": "Focus on asset-light businesses with high capital efficiency. Look for companies where earnings growth does not require proportional capital investment. Contrarian — buys underperforming sectors.",
-        "what_he_looked_for": "Asset-light models, high asset turnover, capital-efficient businesses, sectors at cyclical lows, ROCE improvement trend.",
-        "what_he_avoided": "Capital-intensive manufacturing, businesses requiring constant capex, highly leveraged balance sheets.",
-        "famous_investments": ["PI Industries", "Sudarshan Chemicals", "Aavas Financiers", "Cera Sanitaryware"],
-        "signature_quote": "Asset-light businesses are the future of wealth creation.",
-        "rebalance_style": "Semi-annual. Rotates out of fully valued into undervalued sectors.",
-        "description": "Asset-light businesses, high capital efficiency, ROCE focus, contrarian rotation",
-    },
-    "chandrakant_sampat": {
-        "name": "Chandrakant Sampat", "avatar": "CS", "category": "Indian Legend",
-        "focus": "Original Indian Value", "color": "#a78bfa",
-        "portfolio_size": 10, "sizing_style": "conviction_weighted",
-        "bio": "Chandrakant Sampat (1928-2015) is considered India's original value investor, predating Buffett's fame in India. He invested in Hindustan Unilever and similar consumer monopolies decades before it became fashionable.",
-        "philosophy": "Invest in businesses that sell essential products that people need regardless of economic cycles. Debt-free companies with strong brands and pricing power that compound quietly over decades.",
-        "what_he_looked_for": "Debt-free balance sheets, consumer monopolies, strong brand moats, consistent dividend payers, businesses with 20+ year runway.",
-        "what_he_avoided": "Leveraged businesses, commodity companies, businesses dependent on government contracts, cyclical industries.",
-        "famous_investments": ["Hindustan Unilever (held 40+ years)", "Colgate-Palmolive", "Nestle India", "Infosys (early)"],
-        "signature_quote": "Invest in a business that even a fool can run, because someday a fool will.",
-        "rebalance_style": "Decades-long holds. Portfolio turnover near zero.",
-        "description": "India original Buffett — consumer monopolies, debt-free, decades-long compounders",
-    },
-    "nippon_smallcap": {
-        "name": "Nippon India Small Cap", "avatar": "NS", "category": "Indian Fund",
-        "focus": "High Growth Small Caps", "color": "#22d3ee",
-        "portfolio_size": 60, "sizing_style": "equal_weight",
-        "bio": "Nippon India Small Cap Fund is one of India's largest small cap funds with over Rs 50,000 Cr AUM. It invests across the small cap spectrum with focus on growth businesses in emerging sectors.",
-        "philosophy": "Diversified exposure to India's small cap growth story. Find emerging sector leaders before they become mainstream. Willing to pay higher multiples for high growth businesses.",
-        "what_he_looked_for": "Small cap companies (market cap Rs 500-8000 Cr), high revenue growth above 20%, improving profitability, sector leadership potential.",
-        "what_he_avoided": "Companies with too much debt, loss-making without clear path to profitability, businesses in permanently declining industries.",
-        "famous_investments": ["Tube Investments", "Navin Fluorine", "Happiest Minds", "KPIT Technologies"],
-        "signature_quote": "Small caps today are large caps tomorrow.",
-        "rebalance_style": "Quarterly review.",
-        "description": "Diversified small cap growth, emerging sector leaders, high growth businesses",
-    },
-    "nemish_shah": {
-        "name": "Nemish Shah (Enam)", "avatar": "NSH", "category": "Indian Fund",
-        "focus": "Consumer & Pharma Quality", "color": "#e879f9",
-        "portfolio_size": 15, "sizing_style": "conviction_weighted",
-        "bio": "Nemish Shah co-founded Enam Securities with Vallabh Bhansali. Known for deep expertise in consumer and pharmaceutical businesses. His thesis centres on businesses selling essential products with strong brand moats.",
-        "philosophy": "Focus on consumer staples and pharma — businesses people need regardless of the economy. Brands with pricing power, high repeat purchase, and strong distribution networks compound quietly for decades.",
-        "what_he_looked_for": "Consumer brands with pricing power, pharmaceutical businesses with strong pipelines, debt-free balance sheets, consistent dividend payers.",
-        "what_he_avoided": "Capital-intensive businesses without brand moat, high debt, management with integrity concerns.",
-        "famous_investments": ["Hindustan Unilever", "Nestle India", "Abbott India", "Colgate-Palmolive"],
-        "signature_quote": "Consumer brands are the closest thing to a perpetual motion machine in business.",
-        "rebalance_style": "Very long term holds. Decades in some cases.",
-        "description": "Consumer and pharma specialist, brand moats, pricing power, debt-free",
-    },
-    "mirae_asset": {
-        "name": "Mirae Asset India", "avatar": "MA", "category": "Indian Fund",
-        "focus": "Quality Growth Large Cap", "color": "#a3e635",
-        "portfolio_size": 55, "sizing_style": "market_cap_weighted",
-        "bio": "Mirae Asset Investment Managers India is the Indian arm of South Korean giant Mirae Asset. Known for disciplined process-driven investing, Mirae India Equity has consistently outperformed its benchmark.",
-        "philosophy": "Bottom-up stock selection focusing on quality businesses with sustainable competitive advantages. Sector leaders with consistent earnings growth and strong return ratios.",
-        "what_he_looked_for": "Sector leadership, consistent earnings growth, strong ROE and ROCE, reasonable valuations, well-managed balance sheets.",
-        "what_he_avoided": "Speculative businesses, high leverage, businesses without clear competitive advantage.",
-        "famous_investments": ["ICICI Bank", "Infosys", "Maruti Suzuki", "Bharti Airtel", "Kotak Mahindra"],
-        "signature_quote": "Quality businesses at reasonable prices outperform over time.",
-        "rebalance_style": "Quarterly review. Benchmark-aware.",
-        "description": "Sector leaders, quality businesses, consistent earnings growth, risk management",
-    },
-    "hdfc_mf": {
-        "name": "HDFC Mutual Fund", "avatar": "HM", "category": "Indian Fund",
-        "focus": "Value + Quality Blend", "color": "#fb923c",
-        "portfolio_size": 50, "sizing_style": "conviction_weighted",
-        "bio": "Under Prashant Jain (2003-2022), HDFC Equity Fund became one of India's most respected equity funds. Known for contrarian calls — buying PSU banks and infrastructure when others avoided them.",
-        "philosophy": "Buy quality businesses at value prices. Be contrarian — PSU banks, infrastructure, and cyclicals have their time. Patient capital. Hold through 3-5 year down cycles if the long-term thesis is intact.",
-        "what_he_looked_for": "Quality businesses at value multiples, PSU and cyclical businesses at trough valuations, consistent dividend payers.",
-        "what_he_avoided": "Businesses at extreme valuations, highly leveraged companies, businesses without earnings visibility.",
-        "famous_investments": ["SBI", "HDFC Bank", "Infosys", "BHEL (contrarian)", "ONGC"],
-        "signature_quote": "Be contrarian. Buy when others are selling.",
-        "rebalance_style": "Patient 3-5 year holds. Contrarian rebalancing.",
-        "description": "Value + quality blend, contrarian at times, patient long-term capital",
-    },
-    "anand_rathi": {
-        "name": "Anand Rathi Wealth", "avatar": "AR", "category": "Indian Fund",
-        "focus": "Wealth Preservation + Growth", "color": "#fbbf24",
-        "portfolio_size": 25, "sizing_style": "risk_weighted",
-        "bio": "Anand Rathi Wealth is one of India's leading wealth management firms focused on HNI clients. Their approach prioritizes capital preservation alongside growth, with heavy emphasis on asset allocation.",
-        "philosophy": "Wealth preservation first, growth second. Large cap bias for stability. Dividend-paying businesses for income. Portfolio construction with risk management as a central theme.",
-        "what_he_looked_for": "Large cap stability (market cap above Rs 10,000 Cr), consistent dividend payers, low debt, strong corporate governance, defensive sectors.",
-        "what_he_avoided": "Highly speculative smallcaps, businesses with governance issues, high leverage.",
-        "famous_investments": ["HDFC Bank", "Infosys", "Reliance", "ITC", "Bajaj Finance"],
-        "signature_quote": "Preserving wealth is as important as creating it.",
-        "rebalance_style": "Semi-annual with asset allocation review.",
-        "description": "HNI wealth management, large cap bias, capital preservation, dividend focus",
-    },
-    "ask_investment": {
-        "name": "ASK Investment Managers", "avatar": "ASK", "category": "Indian Fund",
-        "focus": "Quality Large Cap PMS", "color": "#fdba74",
-        "portfolio_size": 20, "sizing_style": "conviction_weighted",
-        "bio": "ASK Investment Managers is one of India's largest PMS providers with over Rs 70,000 Cr in AUM. Known for quality-focused approach and wealth preservation philosophy for HNI clients.",
-        "philosophy": "Capital preservation with growth. Focus on large quality businesses with strong balance sheets. Dividend-paying companies for income. Low churn, patient approach.",
-        "what_he_looked_for": "Large cap quality (above Rs 10,000 Cr market cap), consistent earnings growth, strong ROE, low debt, dividend payers, strong corporate governance.",
-        "what_he_avoided": "Small caps, businesses with governance concerns, high leverage, loss-making businesses.",
-        "famous_investments": ["HDFC Bank", "Bajaj Finance", "Asian Paints", "Infosys", "Kotak Bank"],
-        "signature_quote": "Quality never goes out of style.",
-        "rebalance_style": "Annual. Low turnover wealth management approach.",
-        "description": "Quality large cap PMS, wealth preservation, consistent earnings, low leverage",
-    },
-    "murugappa": {
-        "name": "Murugappa Group Style", "avatar": "MG", "category": "Indian Fund",
-        "focus": "South India Industrial Quality", "color": "#fcd34d",
-        "portfolio_size": 15, "sizing_style": "equal_weight",
-        "bio": "The Murugappa Group is a 125-year-old Chennai-based conglomerate. Their investment philosophy reflects generations of industrial wealth creation — patient, conservative, quality-focused.",
-        "philosophy": "Long-term industrial value creation. Manufacturing excellence, operational efficiency, conservative balance sheets. Family-run businesses with multi-generational thinking.",
-        "what_he_looked_for": "Manufacturing excellence, operational efficiency, conservative balance sheets, consistent dividend history, family-managed businesses with long track records.",
-        "what_he_avoided": "Speculative businesses, high leverage, businesses requiring constant external capital.",
-        "famous_investments": ["Coromandel International", "Carborundum Universal", "Cholamandalam Investment", "EID Parry"],
-        "signature_quote": "Build businesses that last generations.",
-        "rebalance_style": "Very long term. Generational investment horizon.",
-        "description": "Industrial manufacturing, conservative balance sheets, multi-generational quality",
-    },
-    "manish_kejriwal": {
-        "name": "Manish Kejriwal (Amansa)", "avatar": "MK", "category": "Indian Legend",
-        "focus": "Quality Growth PE Style", "color": "#f0abfc",
-        "portfolio_size": 15, "sizing_style": "conviction_weighted",
-        "bio": "Manish Kejriwal founded Amansa Capital after stints at Goldman Sachs and Temasek. He brings a private equity mindset to public market investing — long holding periods, deep business analysis.",
-        "philosophy": "Invest like a PE fund in public markets. Buy stakes in high-quality businesses with long growth runways and hold for 5-10 years. Management quality and corporate governance are paramount.",
-        "what_he_looked_for": "World-class management, high ROE above 20%, durable competitive moat, large addressable market, strong corporate governance.",
-        "what_he_avoided": "Businesses with governance concerns, high leverage, highly competitive commoditized industries.",
-        "famous_investments": ["Info Edge (Naukri)", "HDFC Life", "Asian Paints", "Pidilite Industries"],
-        "signature_quote": "We invest in businesses, not stocks.",
-        "rebalance_style": "Long-term 5-10 year holds. Very low portfolio turnover.",
-        "description": "Private equity mindset, world-class management, 5-10 year holds",
-    },
-    "phil_fisher": {
-        "name": "Philip Fisher", "avatar": "PF", "category": "Global Legend",
-        "focus": "Scuttlebutt Growth Investor", "color": "#14b8a6",
-        "portfolio_size": 12, "sizing_style": "conviction_weighted",
-        "bio": "Philip Fisher wrote Common Stocks and Uncommon Profits (1958), one of the most influential investment books. His scuttlebutt method — researching companies through industry contacts — was revolutionary.",
-        "philosophy": "Buy outstanding companies with superior long-term growth prospects and hold them for years. Use the scuttlebutt method to deeply understand the business. Management quality is paramount.",
-        "what_he_looked_for": "Strong sales growth, high profit margins, R&D investment, excellent management, good labor relations, proprietary products.",
-        "what_he_avoided": "Businesses solely focused on price competition, poor management teams, businesses without R&D investment.",
-        "famous_investments": ["Motorola (held for decades)", "Texas Instruments", "Dow Chemical"],
-        "signature_quote": "The stock market is filled with individuals who know the price of everything, but the value of nothing.",
-        "rebalance_style": "Long-term growth holds. Exits when growth thesis breaks.",
-        "description": "Outstanding growth companies, deep research, management quality paramount",
-    },
-    "carnelian": {
-        "name": "Carnelian Asset (Vikas Khemani)", "avatar": "CA", "category": "Indian Fund",
-        "focus": "Emerging Sector Leaders", "color": "#67e8f9",
-        "portfolio_size": 20, "sizing_style": "equal_weight",
-        "bio": "Vikas Khemani founded Carnelian Asset Management after leading Edelweiss Securities. Focuses on emerging compounders in sectors with strong tailwinds.",
-        "philosophy": "Find businesses in sectors with strong structural tailwinds — defence, specialty chemicals, digital India. Companies transitioning from small to mid cap.",
-        "what_he_looked_for": "Emerging sector leaders, improving margin profile, management execution, market cap Rs 500-15000 Cr.",
-        "what_he_avoided": "Structurally declining industries, high leverage.",
-        "famous_investments": ["KPIT Technologies", "Mas Financial", "Tanla Platforms"],
-        "signature_quote": "Invest in the future, not the past.",
-        "rebalance_style": "Semi-annual review.",
-        "description": "Emerging compounders, structural sector tailwinds",
-    },
+    "rj":{"name":"Rakesh Jhunjhunwala","avatar":"RJ","category":"Indian Legend","focus":"India Growth Compounder","color":"#f59e0b","portfolio_size":15,"sizing_style":"conviction_weighted","bio":"India's Warren Buffett. Turned ₹5,000 into ₹40,000+ crore in 35 years. Passionate bull on India's long-term growth story.","philosophy":"'Give your investments time to mature. Be patient for the world to discover your gems.' Stay fully invested in India's growth. Entry barriers + large TAM + honest management.","exact_criteria":{"market_cap_min_cr":5000,"revenue_growth_min_pct":10,"roce_min_pct":15,"roe_min_pct":15,"de_max":0.5,"opm_min_pct":15,"promoter_min_pct":50},"what_he_looked_for":"Market cap >₹5,000 Cr, Revenue growth >10% CAGR, ROCE >15%, ROE >15%, D/E <0.5, OPM >15%, Promoter >50%, P/E below sector average. Strong cash reserves. Entry barriers. India-specific growth runway.","what_he_avoided":"Capital-scarce businesses, high debt, poor corporate governance, businesses without pricing power.","famous_investments":["Titan Company","Crisil","Lupin","Star Health","Metro Brands"],"signature_quote":"'I am bullish on India. The Indian economy will be a $10 trillion economy by 2030.'","rebalance_style":"Decades-long holds. Sold only when fundamental thesis broke or PE unsustainable."},
+    "vijay_kedia":{"name":"Vijay Kedia","avatar":"VK","category":"Indian Legend","focus":"SMILE — Small Cap Monopolies","color":"#8b5cf6","portfolio_size":8,"sizing_style":"very_concentrated","bio":"Started with ₹25,000 borrowed from his father. Built a ₹1,500+ crore portfolio. Famous for 160x returns on Atul Auto and Cera Sanitaryware.","philosophy":"SMILE: Small in size (<₹5,000 Cr), Medium experience (10-15yr management), Large aspiration (fire in belly), Extra-large market potential (low share in massive TAM). Bet on the jockey, not the horse.","exact_criteria":{"market_cap_max_cr":5000,"management_experience_min_years":10,"large_tam":True,"low_market_share":True,"honest_management":True},"what_he_looked_for":"Market cap <₹5,000 Cr. Management 10-15 years experience. Low market share in large industry. Honest promoters. Scalable model. Does NOT rely on complex financial ratios — bets on management quality.","what_he_avoided":"Large cap stocks (too efficient), businesses already discovered by institutions, sectors with intense competition.","famous_investments":["Atul Auto (₹5→₹800, 160x)","Cera Sanitaryware (₹30→₹4800, 160x)","Aegis Logistics","TAC Infosec"],"signature_quote":"'Bet on the jockey, not the horse. If the management is good, the company can navigate even difficult situations.'","rebalance_style":"Ultra long term — 10 to 20 year holds. Never sold on small dips."},
+    "porinju":{"name":"Porinju Veliyath","avatar":"PV","category":"Indian Legend","focus":"Smallcap Contrarian Turnarounds","color":"#ec4899","portfolio_size":25,"sizing_style":"equal_weight","bio":"The Smallcap King. Founder of Equity Intelligence India. Built fortune finding deeply undervalued small caps ignored by institutions.","philosophy":"Institutional exclusion creates systematic mispricing in small caps. Find beaten-down quality at distressed prices. The lack of coverage is the opportunity.","exact_criteria":{"market_cap_max_cr":2000,"beaten_down_pct":30,"strong_fundamentals":True,"honest_management":True},"what_he_looked_for":"Market cap under ₹2,000 Cr. 30-50% beaten down from highs. Strong historical fundamentals despite temporary problems. Honest management.","what_he_avoided":"Large caps (too efficient), businesses with permanent structural decline, promoters with integrity issues.","famous_investments":["Geojit Financial","Wonderla Holidays","V-Guard Industries"],"signature_quote":"'Markets are not efficient in the small cap space. That is exactly where the opportunity lies for patient investors.'","rebalance_style":"Event-driven. Exits when turnaround thesis plays out."},
+    "ashish_kacholia":{"name":"Ashish Kacholia","avatar":"AK","category":"Indian Legend","focus":"Emerging Quality Compounders","color":"#84cc16","portfolio_size":20,"sizing_style":"equal_weight","bio":"Called the Big Whale of smallcap investing. Identifies emerging compounders before mainstream discovery. Known for exceptional due diligence.","philosophy":"Look for scalable business models in smallcap space with high ROE, strong management execution, and large growth runway. Buy before institutional discovery.","exact_criteria":{"market_cap_max_cr":15000,"roe_min_pct":20,"scalable_model":True,"earnings_growth_min_pct":20},"what_he_looked_for":"Smallcap companies ₹500-15,000 Cr, ROE >20%, scalable business, excellent management, earnings growing 20%+.","what_he_avoided":"Loss-making companies, high debt, promoters with integrity concerns, businesses without competitive advantage.","famous_investments":["Wonderla Holidays","Repco Home Finance","Safari Industries","Genus Power"],"signature_quote":"'I look for businesses that can become 10x in 7-10 years. The business model must be scalable.'","rebalance_style":"Annual review. Replaces underperformers, adds to winners."},
+    "dolly_khanna":{"name":"Dolly Khanna","avatar":"DK","category":"Indian Legend","focus":"Cyclical Turnarounds & Deep Value","color":"#f472b6","portfolio_size":25,"sizing_style":"equal_weight","bio":"One of India's most successful retail investors. Specialises in cyclical businesses at turnaround points, holding through the recovery cycle.","philosophy":"Find cyclical businesses at the absolute bottom of their cycle. Buy when the sector is universally hated. Hold through the recovery. Sell when valuations stretch.","exact_criteria":{"market_cap_max_cr":3000,"at_cyclical_low":True,"pe_below_sector":True},"what_he_looked_for":"Small caps under ₹3,000 Cr. Cyclical businesses at trough valuations. Strong enough balance sheet to survive the downturn.","what_he_avoided":"Large caps, businesses with poor balance sheets that can't survive cyclical downturns.","famous_investments":["Nilkamal","Rain Industries","Thirumalai Chemicals","PPAP Automotive"],"signature_quote":"'Buy what others are ignoring. Sell what others are chasing.'","rebalance_style":"Semi-annual. Exits when cyclical recovery fully priced in."},
+    "chandrakant_sampat":{"name":"Chandrakant Sampat","avatar":"CS","category":"Indian Legend","focus":"India's Original Value Investor","color":"#a78bfa","portfolio_size":10,"sizing_style":"conviction_weighted","bio":"(1928-2015) India's original value investor. Bought Hindustan Unilever and held for 40+ years. His singular criterion: zero debt.","philosophy":"Invest in businesses selling essential products people need regardless of economic cycles. Zero tolerance for debt. Brands with pricing power compound quietly for decades.","exact_criteria":{"debt_free":True,"de_max":0.1,"consumer_monopoly":True,"strong_brand":True,"essential_products":True},"what_he_looked_for":"Debt-free balance sheets (NON-NEGOTIABLE). Consumer monopolies. Strong brand moats. Essential products (FMCG, pharma). Consistent dividend payers. 20+ year runway.","what_he_avoided":"Leveraged businesses, commodity companies, government-dependent businesses, cyclical industries.","famous_investments":["Hindustan Unilever (held 40+ years)","Colgate-Palmolive","Nestle India"],"signature_quote":"'Invest in a business that even a fool can run, because someday a fool will.'","rebalance_style":"Decades-long holds. Portfolio turnover near zero."},
+    "radhakishan_damani":{"name":"Radhakishan Damani","avatar":"RKD","category":"Indian Legend","focus":"Retail & Consumer Value","color":"#fb923c","portfolio_size":8,"sizing_style":"very_concentrated","bio":"Founder of DMart. Legendary investor known for contrarian calls. Philosophy: own businesses you deeply understand.","philosophy":"Extremely concentrated bets on businesses he understands completely. Consumer-facing, essential products, pricing power, low-cost operational model.","exact_criteria":{"consumer_business":True,"opm_min_pct":15,"de_max":0.3,"cash_generating":True},"what_he_looked_for":"Consumer businesses with durable competitive advantage. Low-cost operators. Essential products. Strong cash generation. Owner-operated businesses.","what_he_avoided":"Capital-intensive businesses, high debt, businesses dependent on advertising spend, luxury goods.","famous_investments":["DMart/Avenue Supermarts","VST Industries","3M India","United Breweries"],"signature_quote":"'Build a business where customers come back every single day.'","rebalance_style":"Very long term. Rarely exits once invested."},
+    "raamdeo_agrawal":{"name":"Raamdeo Agrawal","avatar":"RA","category":"Indian Legend","focus":"QGLP — Quality Growth Longevity Price","color":"#60a5fa","portfolio_size":20,"sizing_style":"conviction_weighted","bio":"Co-founder of Motilal Oswal. Developed the QGLP framework. Compounded wealth at 25%+ CAGR for 30+ years.","philosophy":"All four QGLP pillars must align: Quality business, Growth in earnings >20%, Longevity of growth runway 10+ years, Price reasonable (PEG <1.5).","exact_criteria":{"roe_min_pct":20,"earnings_growth_min_pct":20,"peg_max":1.5,"pe_max":50},"what_he_looked_for":"ROE >20%, Earnings growth >20% for 5 years, Large addressable market, Honest management, PE reasonable relative to growth (PEG <1.5). All four QGLP criteria must be met.","what_he_avoided":"Commodity businesses, high debt, management integrity issues, businesses without 5-year earnings visibility.","famous_investments":["Eicher Motors","Page Industries","HDFC Bank","Infosys"],"signature_quote":"'Wealth creation is all about owning great businesses for a long period of time.'","rebalance_style":"Annual formal review. Replaces slowest growing stocks."},
+    "sanjay_bakshi":{"name":"Sanjay Bakshi","avatar":"SB","category":"Indian Legend","focus":"Behavioral Value + Moat Investing","color":"#818cf8","portfolio_size":15,"sizing_style":"conviction_weighted","bio":"Professor at MDI Gurgaon and founder of ValueQuest Capital. Combines Graham's margin of safety with Munger's quality approach and behavioral finance.","philosophy":"Buy high-quality businesses at temporary discounts caused by irrational market behavior. Monopolistic characteristics. Owner-operators. High ROCE.","exact_criteria":{"roce_min_pct":20,"de_max":0.5,"moat":True,"owner_operator":True,"temporary_discount":True},"what_he_looked_for":"High-quality businesses at 20%+ temporary discount. Monopolistic characteristics. Owner-operators with >40% promoter holding. High ROCE. Low debt.","what_he_avoided":"Businesses he doesn't deeply understand, highly leveraged companies, businesses without durable moat.","famous_investments":["Relaxo Footwear","Hawkins Cookers","La Opala","Astral Poly"],"signature_quote":"'The best time to buy a great business is when it is temporarily given away by the market.'","rebalance_style":"Thesis-based. Patient 3-7 year holds."},
+    "kenneth_andrade":{"name":"Kenneth Andrade (Old Bridge)","avatar":"KA","category":"Indian Legend","focus":"Asset-Light Capital Efficiency","color":"#34d399","portfolio_size":20,"sizing_style":"equal_weight","bio":"Founder of Old Bridge Capital. Known for contrarian asset-light investment philosophy. Ran IDFC Premier Equity Fund with exceptional returns.","philosophy":"Focus on asset-light businesses with high capital efficiency. Earnings growth without proportional capital investment. Contrarian — buys underperforming sectors at cyclical lows.","exact_criteria":{"roce_min_pct":15,"asset_light":True,"contrarian":True},"what_he_looked_for":"Asset-light models, high asset turnover, capital-efficient businesses, sectors at cyclical lows, improving ROCE trend.","what_he_avoided":"Capital-intensive manufacturing, businesses requiring constant capex, highly leveraged balance sheets.","famous_investments":["PI Industries","Sudarshan Chemicals","Aavas Financiers","Cera Sanitaryware"],"signature_quote":"'Asset-light businesses are the future of wealth creation in India.'","rebalance_style":"Semi-annual. Rotates from fully-valued to undervalued sectors."},
+    "manish_kejriwal":{"name":"Manish Kejriwal (Amansa)","avatar":"MK","category":"Indian Legend","focus":"PE Mindset in Public Markets","color":"#f0abfc","portfolio_size":15,"sizing_style":"conviction_weighted","bio":"Founder of Amansa Capital after Goldman Sachs and Temasek. Brings private equity discipline — deep due diligence, long holding periods, world-class management focus.","philosophy":"Invest like a PE fund in public markets. World-class management, durable moats, long growth runways. Hold for 5-10 years. Corporate governance is paramount.","exact_criteria":{"roe_min_pct":20,"opm_min_pct":20,"promoter_min_pct":40,"de_max":0.5},"what_he_looked_for":"World-class management, ROE >20%, strong competitive moat, large addressable market, strong corporate governance.","what_he_avoided":"Businesses with governance concerns, high leverage, highly competitive commoditized industries.","famous_investments":["Info Edge (Naukri)","HDFC Life","Asian Paints","Pidilite Industries"],"signature_quote":"'We invest in businesses, not stocks. The stock price will follow the business quality.'","rebalance_style":"Long-term 5-10 year holds. Very low portfolio turnover."},
+    "buffett":{"name":"Warren Buffett","avatar":"WB","category":"Global Legend","focus":"Wonderful Companies at Fair Prices","color":"#3b82f6","portfolio_size":10,"sizing_style":"very_concentrated","bio":"Oracle of Omaha. Compounded Berkshire Hathaway at ~20% CAGR for 58 years. The greatest investor in history.","philosophy":"Buy wonderful businesses at fair prices and hold forever. Wonderful = durable competitive advantage + consistent high ROE without leverage + pricing power + honest management.","exact_criteria":{"roe_min_pct":20,"de_max":0.5,"opm_min_pct":15,"pe_max":35,"consistent_earnings":True},"what_he_looked_for":"ROE >20% consistently without leverage. D/E <0.5. OPM >15% (pricing power). P/E <35x. Business understandable in 5 minutes. Honest management with long tenure.","what_he_avoided":"Businesses he cannot understand, highly leveraged companies, commodity businesses without pricing power.","famous_investments":["Coca-Cola","American Express","Apple","GEICO","Bank of America"],"signature_quote":"'It is far better to buy a wonderful company at a fair price than a fair company at a wonderful price.'","rebalance_style":"Favourite holding period is forever."},
+    "ben_graham":{"name":"Benjamin Graham","avatar":"BG","category":"Global Legend","focus":"Deep Value — Margin of Safety","color":"#64748b","portfolio_size":25,"sizing_style":"equal_weight","bio":"Father of Value Investing. Wrote The Intelligent Investor. Warren Buffett's teacher. Created modern security analysis.","philosophy":"Always buy with a significant margin of safety — the gap between intrinsic value and market price. Never overpay. Treat stocks as ownership in real businesses.","exact_criteria":{"pb_max":1.5,"pe_max":15,"de_max":0.5,"current_ratio_min":2.0,"dividend_payer":True},"what_he_looked_for":"P/B below 1.5x. P/E below 15x. D/E below 0.5. Positive earnings for 5+ years. Dividend payments. Current ratio above 2x.","what_he_avoided":"Speculative stocks, growth stocks at premium valuations, poor balance sheets.","famous_investments":["GEICO (bought at extreme discount)","Northern Pipeline"],"signature_quote":"'The margin of safety is always dependent on the price paid. It can be large at one price, small at another, and nonexistent at a third.'","rebalance_style":"Annual rebalance. Systematic rules-based approach."},
+    "peter_lynch":{"name":"Peter Lynch","avatar":"PL","category":"Global Legend","focus":"GARP — Growth at Reasonable Price","color":"#06b6d4","portfolio_size":30,"sizing_style":"equal_weight","bio":"Managed Fidelity Magellan Fund achieving 29.2% annual returns — best 13-year run of any mutual fund in history.","philosophy":"Use PEG ratio to find growth at reasonable price. PEG below 1 = you are getting growth cheap. Invest in companies you understand from daily life.","exact_criteria":{"peg_max":1.0,"earnings_growth_min_pct":15,"pe_max":50},"what_he_looked_for":"PEG ratio <1.0 (ideally <0.5). Earnings growth >15-20%. Companies he could explain in 2 minutes. Boring industries with exceptional fundamentals.","what_he_avoided":"Businesses he did not understand, hot industries with heavy competition.","famous_investments":["Dunkin Donuts","Taco Bell","Subaru","La Quinta Motor Inns"],"signature_quote":"'Invest in what you know. The real key to making money in stocks is not to get scared out of them.'","rebalance_style":"Quarterly review. High turnover acceptable when PEG changes."},
+    "charlie_munger":{"name":"Charlie Munger","avatar":"CM","category":"Global Legend","focus":"Wonderful Businesses — Pricing Power","color":"#0ea5e9","portfolio_size":5,"sizing_style":"very_concentrated","bio":"Buffett's partner for 60 years. Transformed Buffett from Graham-style deep value to quality compounder investing.","philosophy":"A few wonderful businesses held forever beats a hundred mediocre ones traded frequently. ROCE is the ultimate quality test. Pricing power is the ultimate moat indicator.","exact_criteria":{"roce_min_pct":25,"opm_min_pct":25,"de_max":0.3,"pricing_power":True},"what_he_looked_for":"ROCE >25% (non-negotiable). OPM >25% (pricing power). Near debt-free. Durable competitive moat. Management that allocates capital brilliantly.","what_he_avoided":"Complex businesses, commodity businesses, management that speaks in jargon.","famous_investments":["BYD","Berkshire investments alongside Buffett"],"signature_quote":"'Show me the incentive and I will show you the outcome.'","rebalance_style":"Ultra-long term. Very rare portfolio changes."},
+    "phil_fisher":{"name":"Philip Fisher","avatar":"PF","category":"Global Legend","focus":"Outstanding Growth — Scuttlebutt Research","color":"#14b8a6","portfolio_size":12,"sizing_style":"conviction_weighted","bio":"Wrote Common Stocks and Uncommon Profits (1958). Scuttlebutt research method revolutionised equity research.","philosophy":"Buy outstanding companies with superior long-term growth prospects and hold for years. Research through industry contacts, customers, competitors, suppliers. Management quality is paramount.","exact_criteria":{"sales_growth_min_pct":15,"opm_expanding":True,"management_quality":True,"promoter_min_pct":35},"what_he_looked_for":"Strong and sustained sales growth >15%. Expanding profit margins. Excellent management with R&D commitment. Proprietary products or services. Good labour relations.","what_he_avoided":"Businesses solely focused on price competition, poor management teams, businesses without proprietary advantages.","famous_investments":["Motorola (held for decades)","Texas Instruments","Dow Chemical"],"signature_quote":"'The stock market is filled with individuals who know the price of everything, but the value of nothing.'","rebalance_style":"Long-term growth holds. Exits when growth thesis permanently breaks."},
+    "parag_parikh":{"name":"Parag Parikh Flexi Cap","avatar":"PP","category":"Indian Fund","focus":"Owner-Operator Quality + Behavioral Discipline","color":"#10b981","portfolio_size":22,"sizing_style":"equal_weight","bio":"PPFAS manages one of India's most respected mutual funds. Known for ultra-low churn, behavioural investing approach, and willingness to hold cash when markets are overvalued.","philosophy":"Invest in businesses run by owner-operators with real skin in the game. Focus on pricing power, durable competitive advantages, and behavioural discipline. Hold cash when nothing is cheap.","exact_criteria":{"promoter_min_pct":30,"opm_min_pct":15,"de_max":0.7,"roe_min_pct":15,"pe_max":45},"what_he_looked_for":"Owner-operators (promoter >30%). Pricing power (OPM >15%). Low debt. Consistent ROE >15%. Reasonable PE <45x. Global quality companies alongside Indian.","what_he_avoided":"Highly valued momentum stocks, businesses without pricing power, high leverage.","famous_investments":["HDFC Bank","Bajaj Holdings","ITC","Coal India","Google (global)"],"signature_quote":"'We buy businesses, not stocks. Price is what you pay, value is what you get.'","rebalance_style":"Semi-annual formal review. Very low turnover."},
+    "marcellus":{"name":"Marcellus (Saurabh Mukherjea)","avatar":"MC","category":"Indian Fund","focus":"Consistent Compounders — Forensic Quality","color":"#06b6d4","portfolio_size":12,"sizing_style":"equal_weight","bio":"Founded Marcellus in 2018. CCP strategy uses forensic accounting screens to find companies with clean books and consistently high ROCE. 12-15 stocks maximum.","philosophy":"ROCE >15% (CCP targets >25-40%) for 10 consecutive years. Revenue growth >10% CAGR for 10 years. Near-zero debt. 12 forensic accounting ratios. Low churn.","exact_criteria":{"roce_min_pct":15,"revenue_growth_min_pct":10,"de_max":0.3,"clean_accounting":True,"free_cash_flow_positive":True},"what_he_looked_for":"ROCE >15% for 10 consecutive years (CCP often >40%). Revenue growth >10% CAGR for 10 years. Near-zero debt. Clean accounting (12 forensic ratios). Zero promoter pledge. Free cash flow generation.","what_he_avoided":"Any leverage, aggressive accounting, related-party transactions, promoter pledge.","famous_investments":["Asian Paints","HDFC Bank","Pidilite Industries","Nestle India","TCS"],"signature_quote":"'Great businesses destroy the competition slowly and surely, and without making any noise.'","rebalance_style":"Annual April rebalance. Replaces bottom 2-3 performers."},
+    "motilal_qglp":{"name":"Motilal Oswal QGLP","avatar":"MO","category":"Indian Fund","focus":"Quality + Growth + Longevity + Price","color":"#f97316","portfolio_size":20,"sizing_style":"conviction_weighted","bio":"Motilal Oswal Asset Management applies QGLP framework pioneered by Raamdeo Agrawal. Refined over 30 years.","philosophy":"All four QGLP pillars must be present simultaneously. Quality business, Growth in earnings >20%, Longevity of growth runway 10+ years, Price reasonable (PEG <1.5).","exact_criteria":{"roe_min_pct":20,"earnings_growth_min_pct":20,"peg_max":1.5,"pe_max":50},"what_he_looked_for":"ROE >20%, Earnings growth >20% consistently, Large total addressable market, PEG under 1.5.","what_he_avoided":"Low-quality businesses even at cheap valuations, businesses without 10-year earnings visibility.","famous_investments":["Eicher Motors","Page Industries","Bajaj Finance"],"signature_quote":"'Buy right, sit tight.'","rebalance_style":"Annual formal rebalance."},
+    "nippon_smallcap":{"name":"Nippon India Small Cap","avatar":"NS","category":"Indian Fund","focus":"High Growth Small Caps","color":"#22d3ee","portfolio_size":60,"sizing_style":"equal_weight","bio":"One of India's largest small cap funds with over ₹50,000 Cr AUM. Invests across small caps with focus on growth businesses in emerging sectors.","philosophy":"Diversified exposure to India's small cap growth story. Find emerging sector leaders before mainstream discovery. Willing to pay higher multiples for high growth.","exact_criteria":{"market_cap_max_cr":8000,"revenue_growth_min_pct":15,"roe_min_pct":15,"pe_max":60},"what_he_looked_for":"Small cap companies (₹500-8,000 Cr). Revenue growth >20%. Improving profitability. Sector leadership potential.","what_he_avoided":"Loss-making without path to profitability, too much debt, permanently declining industries.","famous_investments":["Tube Investments","Navin Fluorine","Happiest Minds","KPIT Technologies"],"signature_quote":"'Small caps today are large caps tomorrow.'","rebalance_style":"Quarterly review."},
+    "mirae_asset":{"name":"Mirae Asset India","avatar":"MA","category":"Indian Fund","focus":"Quality Growth — Sector Leaders","color":"#a3e635","portfolio_size":55,"sizing_style":"market_cap_weighted","bio":"Mirae Asset India applies Korean rigor to Indian equity. Known for disciplined, process-driven investing.","philosophy":"Bottom-up stock selection focusing on quality businesses with sustainable competitive advantages. Sector leaders with consistent earnings growth and strong return ratios.","exact_criteria":{"roe_min_pct":15,"roce_min_pct":15,"earnings_growth_min_pct":12,"pe_max":45},"what_he_looked_for":"Sector leadership. Consistent earnings growth. Strong ROE and ROCE. Reasonable valuations. Well-managed balance sheets.","what_he_avoided":"Speculative businesses, high leverage, businesses without competitive advantage.","famous_investments":["ICICI Bank","Infosys","Maruti Suzuki","Bharti Airtel","Kotak Mahindra"],"signature_quote":"'Quality businesses at reasonable prices outperform over any market cycle.'","rebalance_style":"Quarterly review. Benchmark-aware."},
+    "hdfc_mf":{"name":"HDFC Mutual Fund (Prashant Jain era)","avatar":"HM","category":"Indian Fund","focus":"Value + Quality — Contrarian","color":"#fb923c","portfolio_size":50,"sizing_style":"conviction_weighted","bio":"Under Prashant Jain (2003-2022), HDFC Equity Fund became India's most respected equity fund. Famous for contrarian calls on PSU banks and infrastructure.","philosophy":"Buy quality businesses at value prices. Be contrarian. PSU banks, infrastructure, and cyclicals have their time. Patient capital. Hold through 3-5 year down cycles.","exact_criteria":{"pe_max":20,"roe_min_pct":12,"de_max":1.5,"dividend_yield_min_pct":2},"what_he_looked_for":"Quality businesses at value multiples (PE <20x). PSU and cyclical businesses at trough valuations. Consistent dividend payers. Willing to be 3 years early.","what_he_avoided":"Businesses at extreme valuations, highly leveraged, businesses without earnings visibility.","famous_investments":["SBI","HDFC Bank","Infosys","BHEL (contrarian)","ONGC"],"signature_quote":"'Be contrarian. Buy when others are selling in panic.'","rebalance_style":"Patient 3-5 year holds. Contrarian rebalancing."},
+    "enam":{"name":"Enam / Vallabh Bhansali","avatar":"EN","category":"Indian Fund","focus":"Forensic Long-Term Quality","color":"#c4b5fd","portfolio_size":15,"sizing_style":"conviction_weighted","bio":"Enam Securities, founded by Vallabh Bhansali and Nemish Shah, is one of India's most respected institutional brokers known for deep fundamental research.","philosophy":"Management integrity is non-negotiable. Zero tolerance for governance issues. Debt-free businesses with long track records. 10+ year horizon.","exact_criteria":{"de_max":0.1,"management_integrity":True,"track_record_years":10,"roe_min_pct":18},"what_he_looked_for":"Management integrity above all. Debt-free businesses. Consistent 10+ year track record. High ROCE. Pricing power.","what_he_avoided":"Any management integrity concerns, leveraged businesses.","famous_investments":["HDFC Bank","Infosys","Asian Paints","Hero Honda"],"signature_quote":"'Management integrity is the first filter. Everything else is secondary.'","rebalance_style":"Very long term. Extremely low turnover."},
+    "nemish_shah":{"name":"Nemish Shah","avatar":"NSH","category":"Indian Fund","focus":"Consumer & Pharma Quality","color":"#e879f9","portfolio_size":15,"sizing_style":"conviction_weighted","bio":"Co-founded Enam Securities. Deep expertise in consumer and pharmaceutical businesses with decades-long holding horizons.","philosophy":"Consumer staples and pharma — businesses people need regardless of the economy. Brands with pricing power and high repeat purchase compound quietly for decades.","exact_criteria":{"de_max":0.2,"opm_min_pct":18,"roe_min_pct":18,"dividend_payer":True},"what_he_looked_for":"Consumer brands with pricing power. Pharmaceutical businesses with strong pipelines. Debt-free balance sheets. Consistent dividend payers.","what_he_avoided":"Capital-intensive businesses without brand moat, high debt, management integrity concerns.","famous_investments":["Hindustan Unilever","Nestle India","Abbott India","Colgate-Palmolive"],"signature_quote":"'Consumer brands are the closest thing to a perpetual motion machine in business.'","rebalance_style":"Very long term holds. Decades in some cases."},
+    "white_oak":{"name":"White Oak Capital (Prashant Khemka)","avatar":"WO","category":"Indian Fund","focus":"Earnings Quality + ROE without Leverage","color":"#34d399","portfolio_size":30,"sizing_style":"equal_weight","bio":"Founded White Oak Capital after Goldman Sachs Asset Management. Focus on earnings quality and return on equity without leverage.","philosophy":"Earnings quality is the foundation. High, sustainable ROE without leverage. Business quality drives long-term returns. Goldman Sachs rigour applied to Indian markets.","exact_criteria":{"roe_min_pct":20,"de_max":0.5,"earnings_quality":True,"pe_max":40},"what_he_looked_for":"ROE >20% without leverage. High earnings quality (cash conversion). Consistent growth. Reasonable valuations.","what_he_avoided":"Businesses with poor earnings quality, high leverage.","famous_investments":["ICICI Bank","Kotak Bank","Maruti","Titan"],"signature_quote":"'Earnings quality separates sustainable returns from temporary ones.'","rebalance_style":"Annual rebalance. Equal weight approach."},
+    "carnelian":{"name":"Carnelian Asset (Vikas Khemani)","avatar":"CA","category":"Indian Fund","focus":"Emerging Compounders — Structural Sectors","color":"#67e8f9","portfolio_size":20,"sizing_style":"equal_weight","bio":"Founded Carnelian Asset Management after leading Edelweiss Securities. Focuses on emerging compounders in sectors with strong structural tailwinds.","philosophy":"Find businesses in sectors with strong structural tailwinds — defence, specialty chemicals, digital India, PLI beneficiaries. Companies transitioning from small to mid cap.","exact_criteria":{"market_cap_max_cr":20000,"roe_min_pct":18,"earnings_growth_min_pct":20,"opm_min_pct":12},"what_he_looked_for":"Emerging sector leaders in structural growth sectors. Improving margin profile. Management execution track record. Market cap ₹500-20,000 Cr.","what_he_avoided":"Structurally declining industries, high leverage.","famous_investments":["KPIT Technologies","Mas Financial","Tanla Platforms"],"signature_quote":"'Invest in the future, not the past. Structural tailwinds are as important as the business itself.'","rebalance_style":"Semi-annual review."},
+    "anand_rathi":{"name":"Anand Rathi Wealth","avatar":"AR","category":"Indian Fund","focus":"HNI Wealth Preservation + Growth","color":"#fbbf24","portfolio_size":25,"sizing_style":"risk_weighted","bio":"One of India's leading wealth management firms. Approach prioritises capital preservation alongside growth with heavy emphasis on asset allocation.","philosophy":"Wealth preservation first, growth second. Large cap bias for stability. Dividend-paying businesses for income. Risk management as central theme.","exact_criteria":{"market_cap_min_cr":10000,"de_max":0.5,"dividend_yield_min_pct":2,"roe_min_pct":12},"what_he_looked_for":"Large cap stability (>₹10,000 Cr). Consistent dividend payers (>2% yield). Low debt. Strong corporate governance. Defensive sectors.","what_he_avoided":"Highly speculative smallcaps, governance issues, high leverage.","famous_investments":["HDFC Bank","Infosys","Reliance","ITC","Bajaj Finance"],"signature_quote":"'Preserving wealth is as important as creating it.'","rebalance_style":"Semi-annual with asset allocation review."},
+    "ask_investment":{"name":"ASK Investment Managers","avatar":"ASK","category":"Indian Fund","focus":"Quality Large Cap PMS","color":"#fdba74","portfolio_size":20,"sizing_style":"conviction_weighted","bio":"One of India's largest PMS providers with over ₹70,000 Cr AUM. Known for quality-focused wealth preservation philosophy for HNI clients.","philosophy":"Capital preservation with growth. Focus on large quality businesses. Low churn, patient approach. Management quality is the cornerstone.","exact_criteria":{"market_cap_min_cr":15000,"roe_min_pct":18,"de_max":0.4,"pe_max":40},"what_he_looked_for":"Large cap quality (>₹15,000 Cr). Consistent earnings growth. Strong ROE. Low debt. Dividend payers. Strong corporate governance.","what_he_avoided":"Small caps, governance concerns, high leverage, loss-making businesses.","famous_investments":["HDFC Bank","Bajaj Finance","Asian Paints","Infosys","Kotak Bank"],"signature_quote":"'Quality never goes out of style.'","rebalance_style":"Annual. Low turnover wealth management approach."},
+    "murugappa":{"name":"Murugappa Group Style","avatar":"MG","category":"Indian Fund","focus":"Conservative Industrial Quality","color":"#fcd34d","portfolio_size":15,"sizing_style":"equal_weight","bio":"The Murugappa Group is a 125-year-old Chennai-based conglomerate. Investment philosophy reflects generations of industrial wealth creation — patient, conservative, quality-focused.","philosophy":"Long-term industrial value creation. Manufacturing excellence. Conservative balance sheets. Consistent dividend history. Multi-generational thinking.","exact_criteria":{"de_max":0.5,"dividend_yield_min_pct":2,"opm_min_pct":12,"roe_min_pct":12},"what_he_looked_for":"Manufacturing excellence. Operational efficiency. Conservative balance sheets. Consistent dividend history. Family-managed businesses with long track records.","what_he_avoided":"Speculative businesses, high leverage, businesses requiring constant external capital.","famous_investments":["Coromandel International","Carborundum Universal","Cholamandalam","EID Parry"],"signature_quote":"'Build businesses that last generations.'","rebalance_style":"Very long term. Generational investment horizon."},
 }
 
 
-def score_profile(d: dict, profile: str, sector_avgs: dict = None) -> dict:
-    """Score a stock against an investor profile, using sector-relative metrics."""
-    if sector_avgs is None: sector_avgs = {}
-    s, r = 0, []
-    sector = d.get("sector", "Unknown")
-    avgs = sector_avgs.get(sector, {})
-
-    def pct(v): return v * 100 if v is not None else None
-    def vs(val, avg_key, higher_better=True):
+# ═══════════════════════════════════════════════════════════════════════════════
+# PROFILE SCORING — Precise criteria, NOT generic
+# ═══════════════════════════════════════════════════════════════════════════════
+def score_profile(d: dict, pid: str, avgs: dict) -> dict:
+    s=0; r=[]
+    sym=d.get("symbol",""); sec=d.get("sector","Unknown")
+    if sec in ("Unknown","",None): sec=sector_for(sym,"Unknown")
+    sa=avgs.get(sec,{})
+    def p(v): return v*100 if v is not None else None
+    def vc(val,key,hi=True):
         if val is None: return 0
-        avg = avgs.get(avg_key)
-        if avg is None or avg == 0: 
-            # Fallback to absolute thresholds
-            return None
-        ratio = val / avg
-        if higher_better:
-            if ratio >= 1.5: return 30
-            if ratio >= 1.2: return 22
-            if ratio >= 1.0: return 14
-            if ratio >= 0.8: return 8
-            return 3
+        avg=sa.get(key)
+        if not avg or avg==0: return 0
+        ratio=val/avg
+        if hi:
+            if ratio>=1.5: return 30
+            if ratio>=1.2: return 22
+            if ratio>=1.0: return 16
+            if ratio>=0.8: return 10
+            return 4
         else:
-            if ratio <= 0.6: return 30
-            if ratio <= 0.8: return 22
-            if ratio <= 1.0: return 14
-            if ratio <= 1.2: return 8
-            return 3
+            if ratio<=0.5: return 30
+            if ratio<=0.7: return 22
+            if ratio<=0.9: return 16
+            if ratio<=1.1: return 10
+            return 4
+    roe=d.get("roe"); roce=d.get("roce"); opm=d.get("operating_margins")
+    de=d.get("debt_to_equity"); cr=d.get("current_ratio"); pe=d.get("pe_ratio")
+    pb=d.get("pb_ratio"); ph=d.get("promoter_holding"); pledge=d.get("promoter_pledge",0) or 0
+    rev_g=d.get("revenue_growth"); earn_g=d.get("earnings_growth")
+    dy=d.get("dividend_yield"); price=d.get("current_price"); high=d.get("52w_high")
+    mc=(d.get("market_cap") or 0)/1e7
+    debt_free=de is not None and de<0.15
+    pct_off=((high-price)/high*100) if price and high and high>0 else 0
+    pledge_ok=pledge<0.10
 
-    roe = d.get("roe"); roce = d.get("roce"); opm = d.get("operating_margins")
-    dy = pct(d.get("dividend_yield")); ph = d.get("promoter_holding")
-    pe = d.get("pe_ratio"); pb = d.get("pb_ratio"); de = d.get("debt_to_equity")
-    mc = (d.get("market_cap") or 0) / 1e7
-    price = d.get("current_price"); high = d.get("52w_high")
-    rev_growth = d.get("revenue_growth"); earn_growth = d.get("earnings_growth")
-    pct_off = ((high - price) / high * 100) if price and high and high > 0 else 0
-    debt_free = de is not None and de < 0.2
+    if pid=="rj":
+        if mc>=5000: s+=15; r.append(f"Mid/Large cap ₹{mc:.0f}Cr ✓ (RJ min ₹5,000 Cr)")
+        elif mc>=2000: s+=8
+        if roe and p(roe)>=15: s+=15+vc(roe,"roe",True); r.append(f"ROE {p(roe):.1f}% ≥ 15% RJ threshold")
+        if roce and p(roce)>=15: s+=15+vc(roce,"roce",True); r.append(f"ROCE {p(roce):.1f}% ≥ 15% RJ threshold")
+        if de is not None and de<0.5: s+=15; r.append("D/E <0.5 — RJ criterion ✓")
+        if opm and p(opm)>=15: s+=15+vc(opm,"opm",True); r.append(f"OPM {p(opm):.1f}% ≥ 15% ✓")
+        if ph and ph>=0.50: s+=20; r.append(f"Promoter {p(ph):.1f}% >50% — RJ requirement ✓")
+        elif ph and ph>=0.40: s+=12; r.append(f"Promoter {p(ph):.1f}%")
+        if pe and sa.get("pe") and pe<sa["pe"]: s+=10; r.append("P/E below sector avg — RJ entry signal")
+    elif pid=="vijay_kedia":
+        if mc<=1000: s+=30; r.append(f"Small cap ₹{mc:.0f}Cr — SMILE S criterion ✓")
+        elif mc<=5000: s+=20; r.append(f"Mid-small cap ₹{mc:.0f}Cr")
+        if ph and ph>=0.50: s+=20; r.append(f"Promoter {p(ph):.1f}% — jockey aligned ✓")
+        elif ph and ph>=0.35: s+=12
+        if pledge_ok and ph and ph>=0.35: s+=10; r.append("No pledge — management conviction ✓")
+        if roe and p(roe)>=15: s+=15+vc(roe,"roe",True)
+        if opm and p(opm)>=12: s+=10+vc(opm,"opm",True)
+        if pe and 0<pe<40: s+=10; r.append(f"Reasonable P/E {pe:.1f}x")
+    elif pid=="porinju":
+        if mc<=2000: s+=30; r.append(f"True smallcap ₹{mc:.0f}Cr — Porinju territory ✓")
+        elif mc<=5000: s+=15
+        if pct_off>=40: s+=25; r.append(f"Beaten down {pct_off:.0f}% off 52W high — opportunity")
+        elif pct_off>=25: s+=15; r.append(f"{pct_off:.0f}% below 52W high")
+        if pe and 0<pe<15: s+=20; r.append(f"Deep value P/E {pe:.1f}x")
+        elif pe and pe<25: s+=10
+        if roe and p(roe)>=12: s+=15+vc(roe,"roe",True)
+        if de is None or de<1.0: s+=10
+    elif pid=="ashish_kacholia":
+        if mc<=5000: s+=25; r.append(f"Smallcap ₹{mc:.0f}Cr ✓")
+        elif mc<=15000: s+=15; r.append(f"Mid cap ₹{mc:.0f}Cr")
+        if roe and p(roe)>=20: s+=25+vc(roe,"roe",True); r.append(f"High ROE {p(roe):.1f}% ✓")
+        elif roe and p(roe)>=15: s+=15
+        if earn_g and p(earn_g)>=20: s+=20; r.append(f"Earnings growing {p(earn_g):.1f}% ✓")
+        elif earn_g and p(earn_g)>=12: s+=12
+        if opm and p(opm)>=15: s+=15+vc(opm,"opm",True)
+        if pe and 0<pe<50: s+=10
+    elif pid=="dolly_khanna":
+        if mc<=3000: s+=25; r.append(f"Small cap ₹{mc:.0f}Cr — Dolly's zone ✓")
+        elif mc<=7000: s+=12
+        if pct_off>=30: s+=25; r.append(f"Cyclical opportunity {pct_off:.0f}% off highs")
+        elif pct_off>=15: s+=15
+        if roe and p(roe)>=12: s+=20+vc(roe,"roe",True); r.append(f"ROE recovery signal {p(roe):.1f}%")
+        if de is not None and de<0.7: s+=15
+        if pe and 0<pe<20: s+=15; r.append(f"Cheap P/E {pe:.1f}x")
+    elif pid=="chandrakant_sampat":
+        if debt_free: s+=35; r.append("Debt-free — Sampat's NON-NEGOTIABLE criterion ✓")
+        elif de and de<0.1: s+=25; r.append("Near debt-free ✓")
+        if roe and p(roe)>=20: s+=25; r.append(f"High ROE {p(roe):.1f}%")
+        elif roe and p(roe)>=15: s+=15
+        if opm and p(opm)>=20: s+=25; r.append(f"Consumer pricing power OPM {p(opm):.1f}%")
+        elif opm and p(opm)>=12: s+=12
+        if pe and 0<pe<40: s+=15
+    elif pid=="radhakishan_damani":
+        if opm and p(opm)>=15: s+=30; r.append(f"Consumer pricing power OPM {p(opm):.1f}%")
+        elif opm and p(opm)>=10: s+=18
+        if de is not None and de<0.3: s+=25; r.append("Conservative balance sheet ✓")
+        if dy and p(dy)>=2: s+=15; r.append(f"Cash return {p(dy):.1f}% yield")
+        if roe and p(roe)>=18: s+=20; r.append(f"Strong ROE {p(roe):.1f}%")
+        elif roe and p(roe)>=12: s+=12
+        if mc>=5000: s+=10
+    elif pid=="raamdeo_agrawal":
+        q_met=roe and p(roe)>=20; g_met=(earn_g and p(earn_g)>=20) or (rev_g and p(rev_g)>=15); p_met=pe and 0<pe<50
+        if q_met: s+=30; r.append(f"Q: ROE {p(roe):.1f}%≥20% ✓")
+        if g_met: s+=30; r.append("G: Growth criterion met (>20%) ✓")
+        if p_met: s+=20; r.append(f"P: Reasonable P/E {pe:.1f}x ✓")
+        if roce and p(roce)>=20: s+=20; r.append(f"ROCE {p(roce):.1f}%")
+    elif pid=="sanjay_bakshi":
+        if roce and p(roce)>=20: s+=25+vc(roce,"roce",True); r.append(f"Quality ROCE {p(roce):.1f}%")
+        elif roce and p(roce)>=15: s+=15
+        if debt_free or (de and de<0.3): s+=20; r.append("Graham safety margin ✓")
+        if pct_off>=20: s+=25; r.append(f"Behavioral mispricing {pct_off:.0f}% off highs")
+        elif pct_off>=10: s+=12
+        if ph and ph>=0.40: s+=15; r.append(f"Owner-operator {p(ph):.1f}%")
+        if opm and p(opm)>=20: s+=15; r.append(f"Wide margins OPM {p(opm):.1f}%")
+    elif pid=="kenneth_andrade":
+        if roce and p(roce)>=20: s+=30+vc(roce,"roce",True); r.append(f"Capital efficient ROCE {p(roce):.1f}%")
+        elif roce and p(roce)>=15: s+=18
+        if opm and p(opm)>=15: s+=25+vc(opm,"opm",True); r.append(f"Asset-light margins {p(opm):.1f}%")
+        if de is not None and de<0.3: s+=20; r.append("Low capex model ✓")
+        if pct_off>=15: s+=15; r.append(f"Contrarian entry {pct_off:.0f}% off highs")
+    elif pid=="manish_kejriwal":
+        if roe and p(roe)>=20: s+=25+vc(roe,"roe",True); r.append(f"PE-quality ROE {p(roe):.1f}%")
+        elif roe and p(roe)>=15: s+=15
+        if opm and p(opm)>=20: s+=25+vc(opm,"opm",True); r.append(f"Quality margins {p(opm):.1f}%")
+        if ph and ph>=0.45: s+=25; r.append(f"Management aligned {p(ph):.1f}%")
+        elif ph and ph>=0.30: s+=15
+        if debt_free or (de and de<0.4): s+=15
+        if pledge_ok: s+=10
+    elif pid=="buffett":
+        if roe and p(roe)>=20: s+=25+vc(roe,"roe",True); r.append(f"Buffett-grade ROE {p(roe):.1f}% ✓")
+        elif roe and p(roe)>=15: s+=15
+        if de is not None and de<0.5: s+=20; r.append("Conservative balance sheet ✓")
+        if opm and p(opm)>=15: s+=20+vc(opm,"opm",True); r.append(f"Pricing power OPM {p(opm):.1f}% ✓")
+        elif opm and p(opm)>=10: s+=10
+        if pe and 0<pe<35: s+=20; r.append(f"Reasonable P/E {pe:.1f}x for the quality ✓")
+        elif pe and pe<50: s+=8
+    elif pid=="ben_graham":
+        if pb and pb<1.0: s+=40; r.append(f"Below book P/B {pb:.2f}x — Graham ideal ✓")
+        elif pb and pb<1.5: s+=28; r.append(f"Near book P/B {pb:.2f}x ✓")
+        elif pb and pb<2.0: s+=14
+        if pe and 0<pe<12: s+=30; r.append(f"Deep value P/E {pe:.1f}x — Graham zone ✓")
+        elif pe and pe<15: s+=20; r.append(f"Value P/E {pe:.1f}x ✓")
+        elif pe and pe<20: s+=8
+        if cr and cr>=2.0: s+=20; r.append(f"Current ratio {cr:.1f}x — Graham safety ✓")
+        if dy and p(dy)>=1: s+=10; r.append(f"Dividend payer {p(dy):.1f}%")
+        if de is not None and de<0.5: s+=10
+    elif pid=="peter_lynch":
+        peg_calc=None
+        if roe and pe and p(roe)>0: peg_calc=pe/p(roe)
+        if peg_calc and peg_calc<0.5: s+=40; r.append(f"Excellent PEG ~{peg_calc:.2f} ✓")
+        elif peg_calc and peg_calc<1.0: s+=28; r.append(f"Good PEG ~{peg_calc:.2f} ✓")
+        elif peg_calc and peg_calc<1.5: s+=15
+        if earn_g and p(earn_g)>=20: s+=25; r.append(f"Lynch growth signal {p(earn_g):.1f}% ✓")
+        elif earn_g and p(earn_g)>=15: s+=15
+        elif rev_g and p(rev_g)>=15: s+=12
+        if pe and 0<pe<30: s+=15; r.append(f"Reasonable P/E {pe:.1f}x")
+    elif pid=="charlie_munger":
+        if roce and p(roce)>=25: s+=35+vc(roce,"roce",True); r.append(f"Munger-grade ROCE {p(roce):.1f}% ✓")
+        elif roce and p(roce)>=20: s+=20
+        elif roce and p(roce)>=15: s+=10
+        if opm and p(opm)>=25: s+=30+vc(opm,"opm",True); r.append(f"Pricing power OPM {p(opm):.1f}% ✓")
+        elif opm and p(opm)>=20: s+=18
+        if debt_free: s+=25; r.append("Debt-free compounder — Munger approved ✓")
+        elif de and de<0.2: s+=15
+    elif pid=="phil_fisher":
+        if roe and p(roe)>=20: s+=25+vc(roe,"roe",True); r.append(f"Superior ROE {p(roe):.1f}%")
+        elif roe and p(roe)>=15: s+=15
+        if opm and p(opm)>=18: s+=25+vc(opm,"opm",True); r.append(f"Expanding margins {p(opm):.1f}%")
+        if ph and ph>=0.40: s+=20; r.append(f"Management aligned {p(ph):.1f}%")
+        if rev_g and p(rev_g)>=15: s+=20; r.append(f"Sales growth {p(rev_g):.1f}%")
+        elif rev_g and p(rev_g)>=10: s+=12
+        if pe and 0<pe<50: s+=10
+    elif pid=="parag_parikh":
+        if ph and ph>=0.50: s+=25; r.append(f"Strong owner-operator {p(ph):.1f}%")
+        elif ph and ph>=0.35: s+=18; r.append(f"Owner-operator {p(ph):.1f}%")
+        elif ph and ph>=0.25: s+=10
+        if opm and p(opm)>=15: s+=20+vc(opm,"opm",True); r.append(f"Pricing power {p(opm):.1f}%")
+        elif opm and p(opm)>=10: s+=10
+        if de is not None and de<0.7: s+=15; r.append("Conservative balance sheet")
+        if roe and p(roe)>=15: s+=20+vc(roe,"roe",True)
+        if pe and 0<pe<50: s+=10
+        if pledge_ok: s+=10
+    elif pid=="marcellus":
+        if debt_free: s+=30; r.append("Debt-free — Marcellus essential criterion ✓")
+        elif de and de<0.1: s+=22; r.append("Near debt-free ✓")
+        elif de and de<0.3: s+=10
+        if roce and p(roce)>=25: s+=30+vc(roce,"roce",True); r.append(f"Exceptional ROCE {p(roce):.1f}% — CCP quality ✓")
+        elif roce and p(roce)>=15: s+=18; r.append(f"Strong ROCE {p(roce):.1f}%")
+        if roe and p(roe)>=20: s+=15+vc(roe,"roe",True)
+        if opm and p(opm)>=18: s+=15; r.append(f"Wide margins {p(opm):.1f}%")
+        if pledge==0: s+=10; r.append("Zero promoter pledge — forensic positive ✓")
+    elif pid=="motilal_qglp":
+        q_ok=roe and p(roe)>=20; g_ok=earn_g and p(earn_g)>=20; p_ok=pe and 0<pe<50
+        if q_ok: s+=28; r.append(f"Quality: ROE {p(roe):.1f}% ✓")
+        if g_ok: s+=28; r.append(f"Growth: Earnings {p(earn_g):.1f}% ✓")
+        if p_ok: s+=22; r.append(f"Price: P/E {pe:.1f}x ✓")
+        if roce and p(roce)>=20: s+=22; r.append(f"ROCE {p(roce):.1f}%")
+    elif pid=="nippon_smallcap":
+        if mc<=2000: s+=28; r.append(f"Small cap ₹{mc:.0f}Cr ✓")
+        elif mc<=5000: s+=20; r.append(f"Small-mid cap ₹{mc:.0f}Cr")
+        elif mc<=8000: s+=12
+        if roe and p(roe)>=15: s+=22+vc(roe,"roe",True); r.append(f"Growth ROE {p(roe):.1f}%")
+        elif roe and p(roe)>=12: s+=12
+        if earn_g and p(earn_g)>=20: s+=25; r.append(f"High growth {p(earn_g):.1f}%")
+        elif earn_g and p(earn_g)>=12: s+=15
+        if pe and 0<pe<60: s+=15
+        if opm and p(opm)>=10: s+=10
+    elif pid=="mirae_asset":
+        if roe and p(roe)>=15: s+=25+vc(roe,"roe",True); r.append(f"Quality ROE {p(roe):.1f}%")
+        if roce and p(roce)>=15: s+=22+vc(roce,"roce",True); r.append(f"Strong ROCE {p(roce):.1f}%")
+        if opm and p(opm)>=15: s+=20+vc(opm,"opm",True); r.append(f"Sector leader margins {p(opm):.1f}%")
+        if pe and 0<pe<45: s+=15; r.append(f"Reasonable P/E {pe:.1f}x")
+        if mc>=5000: s+=10
+    elif pid=="hdfc_mf":
+        if pe and 0<pe<15: s+=28; r.append(f"Deep value P/E {pe:.1f}x — HDFC MF style ✓")
+        elif pe and pe<20: s+=20; r.append(f"Value P/E {pe:.1f}x")
+        if roe and p(roe)>=12: s+=22+vc(roe,"roe",True); r.append(f"Quality ROE {p(roe):.1f}%")
+        if dy and p(dy)>=2: s+=18; r.append(f"Dividend support {p(dy):.1f}%")
+        if de is not None and de<0.7: s+=15
+        if pct_off>=20: s+=17; r.append(f"Contrarian opportunity {pct_off:.0f}% off highs")
+    elif pid=="enam":
+        if debt_free: s+=32; r.append("Debt-free — Enam non-negotiable ✓")
+        elif de and de<0.1: s+=20
+        if ph and ph>=0.50: s+=25; r.append(f"Management alignment {p(ph):.1f}%")
+        elif ph and ph>=0.35: s+=15
+        if roe and p(roe)>=18: s+=22+vc(roe,"roe",True)
+        if opm and p(opm)>=15: s+=15+vc(opm,"opm",True)
+        if pledge==0: s+=10; r.append("Zero pledge — integrity signal ✓")
+    elif pid=="nemish_shah":
+        if debt_free or (de and de<0.2): s+=28; r.append("Debt-free consumer/pharma quality ✓")
+        if opm and p(opm)>=18: s+=25+vc(opm,"opm",True); r.append(f"Pricing power OPM {p(opm):.1f}%")
+        elif opm and p(opm)>=12: s+=15
+        if roe and p(roe)>=18: s+=22+vc(roe,"roe",True)
+        if ph and ph>=0.40: s+=15
+        if dy and p(dy)>=1.5: s+=10; r.append(f"Dividend {p(dy):.1f}%")
+    elif pid=="white_oak":
+        if roe and p(roe)>=20: s+=28+vc(roe,"roe",True); r.append(f"Quality ROE {p(roe):.1f}%")
+        elif roe and p(roe)>=15: s+=18
+        if de is not None and de<0.5: s+=22; r.append("ROE without excessive leverage ✓")
+        if opm and p(opm)>=18: s+=22+vc(opm,"opm",True)
+        if pe and 0<pe<40: s+=18
+        if mc>=5000: s+=10
+    elif pid=="carnelian":
+        if mc<=20000 and mc>=500: s+=18; r.append(f"Emerging compounder ₹{mc:.0f}Cr")
+        if roe and p(roe)>=18: s+=22+vc(roe,"roe",True); r.append(f"High ROE {p(roe):.1f}%")
+        if earn_g and p(earn_g)>=20: s+=22; r.append(f"Fast growing {p(earn_g):.1f}%")
+        elif earn_g and p(earn_g)>=12: s+=12
+        if opm and p(opm)>=12: s+=18+vc(opm,"opm",True)
+        if pe and 0<pe<55: s+=12
+    elif pid=="anand_rathi":
+        if mc>=10000: s+=20; r.append(f"Large cap stability ₹{mc:.0f}Cr ✓")
+        if dy and p(dy)>=3: s+=30; r.append(f"Strong dividend {p(dy):.1f}%")
+        elif dy and p(dy)>=2: s+=20; r.append(f"Good dividend {p(dy):.1f}%")
+        elif dy and p(dy)>=1: s+=10
+        if de is not None and de<0.5: s+=22; r.append("Capital preservation balance sheet ✓")
+        if roe and p(roe)>=12: s+=18
+        if pe and 0<pe<25: s+=10
+    elif pid=="ask_investment":
+        if mc>=15000: s+=18; r.append(f"Institutional quality ₹{mc:.0f}Cr ✓")
+        if roe and p(roe)>=18: s+=25+vc(roe,"roe",True); r.append(f"Quality ROE {p(roe):.1f}%")
+        elif roe and p(roe)>=12: s+=15
+        if de is not None and de<0.4: s+=22; r.append("Conservative balance sheet ✓")
+        if dy and p(dy)>=1.5: s+=15
+        if opm and p(opm)>=15: s+=15
+        if pledge_ok: s+=10
+    elif pid=="murugappa":
+        if de is not None and de<0.5: s+=28; r.append("Conservative balance sheet ✓")
+        if dy and p(dy)>=2: s+=22; r.append(f"Dividend history {p(dy):.1f}%")
+        elif dy and p(dy)>=1: s+=12
+        if opm and p(opm)>=12: s+=22+vc(opm,"opm",True); r.append(f"Manufacturing margins {p(opm):.1f}%")
+        if roe and p(roe)>=12: s+=18+vc(roe,"roe",True)
+        if mc>=1000: s+=10
+    else:
+        if roe and p(roe)>=18: s+=30
+        if de is not None and de<0.5: s+=20
+        if opm and p(opm)>=15: s+=25
+        if pe and 0<pe<35: s+=25
 
-    if profile == "rj":
-        sv = vs(roe, "roe", True)
-        if sv: s += sv; 
-        elif roe and pct(roe) >= 20: s += 25; r.append(f"Strong ROE {pct(roe):.1f}%")
-        elif roe and pct(roe) >= 15: s += 15
-        sv2 = vs(roce, "roce", True)
-        if sv2: s += sv2
-        elif roce and pct(roce) >= 20: s += 20
-        if ph and ph >= 0.5: s += 30; r.append(f"High promoter {pct(ph):.1f}%")
-        elif ph and ph >= 0.35: s += 18
-        if pe and 0 < pe < 35: s += 20; r.append(f"Reasonable P/E {pe:.1f}x")
-        if rev_growth and pct(rev_growth) >= 15: s += 10; r.append(f"Growing {pct(rev_growth):.1f}%")
-
-    elif profile == "buffett":
-        sv = vs(roe, "roe", True)
-        s += (sv or (25 if roe and pct(roe) >= 20 else 10 if roe and pct(roe) >= 15 else 0))
-        if roe and pct(roe) >= 20: r.append(f"Strong ROE {pct(roe):.1f}%")
-        if debt_free: s += 25; r.append("Near debt-free")
-        elif de and de < 0.5: s += 15
-        sv2 = vs(opm, "opm", True)
-        s += (sv2 or (20 if opm and pct(opm) >= 20 else 10 if opm and pct(opm) >= 12 else 0))
-        if opm and pct(opm) >= 20: r.append(f"Strong OPM {pct(opm):.1f}%")
-        if pe and 0 < pe < 25: s += 20; r.append(f"Reasonable P/E {pe:.1f}x")
-        elif pe and pe < 35: s += 10
-
-    elif profile == "marcellus":
-        if debt_free: s += 35; r.append("Debt-free")
-        elif de and de < 0.3: s += 15
-        sv = vs(roce, "roce", True)
-        if sv: s += sv; 
-        if roce and pct(roce) >= 25: s += 5; r.append(f"Exceptional ROCE {pct(roce):.1f}%")
-        elif roce and pct(roce) >= 18: r.append(f"Strong ROCE {pct(roce):.1f}%")
-        sv2 = vs(opm, "opm", True)
-        s += (sv2 or 0)
-        if opm and pct(opm) >= 20: r.append(f"Wide margins {pct(opm):.1f}%")
-        if roe and pct(roe) >= 20: s += 15
-
-    elif profile == "vijay_kedia":
-        if 0 < mc < 5000: s += 25; r.append(f"Small/mid cap Rs {mc:.0f}Cr")
-        elif mc < 20000: s += 12
-        if ph and ph >= 0.5: s += 25; r.append(f"High promoter {pct(ph):.1f}%")
-        elif ph and ph >= 0.35: s += 15
-        sv = vs(roe, "roe", True)
-        s += (sv or (20 if roe and pct(roe) >= 20 else 10))
-        if roe and pct(roe) >= 20: r.append(f"High ROE {pct(roe):.1f}%")
-        sv2 = vs(opm, "opm", True)
-        s += (sv2 or (15 if opm and pct(opm) >= 15 else 5))
-
-    elif profile == "parag_parikh":
-        if ph and ph >= 0.45: s += 25; r.append(f"Owner-operator {pct(ph):.1f}%")
-        elif ph and ph >= 0.3: s += 15
-        sv = vs(opm, "opm", True)
-        s += (sv or (20 if opm and pct(opm) >= 20 else 10))
-        if opm and pct(opm) >= 20: r.append(f"Pricing power {pct(opm):.1f}%")
-        if debt_free or (de and de < 0.5): s += 20; r.append("Conservative balance sheet")
-        sv2 = vs(roe, "roe", True)
-        s += (sv2 or (15 if roe and pct(roe) >= 18 else 5))
-
-    elif profile == "ben_graham":
-        if pb and 0 < pb < 1: s += 40; r.append(f"Below book P/B {pb:.2f}x")
-        elif pb and pb < 1.5: s += 28; r.append(f"Near book P/B {pb:.2f}x")
-        elif pb and pb < 2: s += 15
-        if pe and 0 < pe < 12: s += 35; r.append(f"Deep value P/E {pe:.1f}x")
-        elif pe and pe < 15: s += 22
-        elif pe and pe < 20: s += 10
-        if debt_free: s += 25; r.append("Graham safety")
-
-    elif profile == "peter_lynch":
-        if roe and pe and roe > 0 and pe > 0:
-            peg_calc = pe / pct(roe)
-            if peg_calc < 0.5: s += 40; r.append(f"Excellent PEG {peg_calc:.2f}")
-            elif peg_calc < 1.0: s += 28; r.append(f"Good PEG {peg_calc:.2f}")
-            elif peg_calc < 1.5: s += 15
-        if rev_growth and pct(rev_growth) >= 15: s += 25; r.append(f"Growing fast {pct(rev_growth):.1f}%")
-        if pe and 0 < pe < 30: s += 15
-
-    elif profile == "charlie_munger":
-        sv = vs(roce, "roce", True)
-        s += (sv or (30 if roce and pct(roce) >= 25 else 10))
-        if roce and pct(roce) >= 25: r.append(f"Exceptional ROCE {pct(roce):.1f}%")
-        sv2 = vs(opm, "opm", True)
-        s += (sv2 or (20 if opm and pct(opm) >= 25 else 8))
-        if opm and pct(opm) >= 25: r.append(f"Pricing power {pct(opm):.1f}%")
-        if debt_free: s += 20; r.append("Debt-free compounder")
-
-    elif profile == "porinju":
-        if 0 < mc < 2000: s += 35; r.append(f"True smallcap Rs {mc:.0f}Cr")
-        elif mc < 5000: s += 18
-        if pct_off >= 30: s += 25; r.append(f"Beaten down {pct_off:.0f}% off highs")
-        elif pct_off >= 15: s += 12
-        if pe and 0 < pe < 20: s += 25; r.append(f"Cheap P/E {pe:.1f}x")
-
-    elif profile == "ashish_kacholia":
-        if 0 < mc < 5000: s += 25; r.append(f"Smallcap Rs {mc:.0f}Cr")
-        elif mc < 15000: s += 12
-        sv = vs(roe, "roe", True)
-        s += (sv or (20 if roe and pct(roe) >= 20 else 8))
-        if roe and pct(roe) >= 20: r.append(f"High ROE {pct(roe):.1f}%")
-        sv2 = vs(opm, "opm", True)
-        s += (sv2 or (15 if opm and pct(opm) >= 15 else 5))
-        if earn_growth and pct(earn_growth) >= 20: s += 15; r.append(f"Earnings growing {pct(earn_growth):.1f}%")
-
-    elif profile == "motilal_qglp":
-        q_met = (roe and pct(roe) >= 18) and (opm and pct(opm) >= 15)
-        g_met = (rev_growth and pct(rev_growth) >= 15) or (earn_growth and pct(earn_growth) >= 15)
-        p_met = pe and 0 < pe < 45
-        if q_met: s += 30; r.append("Quality criterion met")
-        if g_met: s += 25; r.append(f"Growth criterion met")
-        if p_met: s += 25; r.append(f"Price reasonable {pe:.1f}x")
-        if roce and pct(roce) >= 20: s += 20; r.append(f"ROCE {pct(roce):.1f}%")
-
-    elif profile == "dolly_khanna":
-        if 0 < mc < 3000: s += 25; r.append(f"Small cap Rs {mc:.0f}Cr")
-        if pct_off >= 25: s += 25; r.append(f"Turnaround {pct_off:.0f}% off highs")
-        sv = vs(roe, "roe", True)
-        s += (sv or (20 if roe and pct(roe) >= 15 else 5))
-        if roe and pct(roe) >= 15: r.append(f"ROE recovery {pct(roe):.1f}%")
-
-    elif profile == "enam":
-        if debt_free: s += 35; r.append("Debt-free")
-        elif de and de < 0.2: s += 20
-        if ph and ph >= 0.45: s += 25; r.append(f"Management alignment {pct(ph):.1f}%")
-        sv = vs(roe, "roe", True)
-        s += (sv or (15 if roe and pct(roe) >= 18 else 5))
-        sv2 = vs(opm, "opm", True)
-        s += (sv2 or (15 if opm and pct(opm) >= 15 else 5))
-
-    elif profile == "white_oak":
-        sv = vs(roe, "roe", True)
-        s += (sv or (25 if roe and pct(roe) >= 22 else 10))
-        if roe and pct(roe) >= 22: r.append(f"Quality ROE {pct(roe):.1f}%")
-        sv2 = vs(opm, "opm", True)
-        s += (sv2 or (20 if opm and pct(opm) >= 20 else 8))
-        if pe and 0 < pe < 35: s += 20; r.append(f"GARP {pe:.1f}x")
-        if debt_free or (de and de < 0.4): s += 20
-
-    elif profile == "carnelian":
-        if 0 < mc < 20000: s += 20; r.append(f"Emerging compounder Rs {mc:.0f}Cr")
-        sv = vs(roe, "roe", True)
-        s += (sv or (20 if roe and pct(roe) >= 20 else 8))
-        if roe and pct(roe) >= 20: r.append(f"High ROE {pct(roe):.1f}%")
-        sv2 = vs(opm, "opm", True)
-        s += (sv2 or (15 if opm and pct(opm) >= 15 else 5))
-        if earn_growth and pct(earn_growth) >= 20: s += 15; r.append(f"Fast growing {pct(earn_growth):.1f}%")
-
-    elif profile == "radhakishan_damani":
-        if opm and pct(opm) >= 15: s += 30; r.append(f"Consumer pricing power {pct(opm):.1f}%")
-        if debt_free: s += 25; r.append("Debt-free consumer business")
-        if dy and dy >= 0.02: s += 20; r.append(f"Cash return {pct(dy):.1f}%")
-        if roe and pct(roe) >= 18: s += 15; r.append(f"Strong ROE {pct(roe):.1f}%")
-        if mc > 5000: s += 10
-
-    elif profile == "raamdeo_agrawal":
-        q_met = (roe and pct(roe) >= 20) and (opm and pct(opm) >= 15)
-        g_met = (rev_growth and pct(rev_growth) >= 15) or (earn_growth and pct(earn_growth) >= 15)
-        p_met = pe and 0 < pe < 45
-        l_met = ph and ph >= 0.40
-        if q_met: s += 30; r.append("Quality criterion met (ROE + margins)")
-        if g_met: s += 25; r.append("Growth criterion met")
-        if p_met: s += 25; r.append(f"Price reasonable P/E {pe:.1f}x")
-        if l_met: s += 20; r.append(f"Longevity promoter {pct(ph):.1f}%")
-
-    elif profile == "sanjay_bakshi":
-        if roe and pct(roe) >= 20: s += 25; r.append(f"Quality moat ROE {pct(roe):.1f}%")
-        elif roe and pct(roe) >= 15: s += 15
-        if debt_free or (de is not None and de < 0.3): s += 25; r.append("Graham safety margin")
-        pct_off = ((high-price)/high*100) if price and high and high > 0 else 0
-        if pct_off >= 20: s += 25; r.append(f"Behavioral mispricing {pct_off:.0f}% off highs")
-        if opm and pct(opm) >= 20: s += 15; r.append(f"Wide margins {pct(opm):.1f}%")
-        if pe and 0 < pe < 35: s += 10
-
-    elif profile == "kenneth_andrade":
-        if roce and pct(roce) >= 20: s += 30; r.append(f"Capital efficient ROCE {pct(roce):.1f}%")
-        elif roce and pct(roce) >= 15: s += 18
-        if opm and pct(opm) >= 15: s += 25; r.append(f"Asset-light margins {pct(opm):.1f}%")
-        if de is not None and de < 0.3: s += 20; r.append("Low capex balance sheet")
-        pct_off2 = ((high-price)/high*100) if price and high and high > 0 else 0
-        if pct_off2 >= 15: s += 15; r.append(f"Contrarian entry {pct_off2:.0f}% off highs")
-
-    elif profile == "chandrakant_sampat":
-        if debt_free: s += 30; r.append("Debt-free — Sampat non-negotiable")
-        if roe and pct(roe) >= 20: s += 25; r.append(f"High ROE {pct(roe):.1f}%")
-        elif roe and pct(roe) >= 15: s += 15
-        if opm and pct(opm) >= 20: s += 25; r.append(f"Consumer pricing power {pct(opm):.1f}%")
-        elif opm and pct(opm) >= 12: s += 12
-        if pe and 0 < pe < 35: s += 20
-
-    elif profile == "nippon_smallcap":
-        if 0 < mc < 8000: s += 30; r.append(f"Small cap Rs {mc:.0f}Cr")
-        elif mc < 15000: s += 15
-        if roe and pct(roe) >= 18: s += 25; r.append(f"High growth ROE {pct(roe):.1f}%")
-        elif roe and pct(roe) >= 12: s += 15
-        if opm and pct(opm) >= 15: s += 25; r.append(f"Emerging margins {pct(opm):.1f}%")
-        elif opm and pct(opm) >= 8: s += 12
-        if pe and 0 < pe < 50: s += 20
-
-    elif profile == "nemish_shah":
-        if debt_free: s += 30; r.append("Debt-free consumer/pharma")
-        if opm and pct(opm) >= 20: s += 25; r.append(f"Pricing power OPM {pct(opm):.1f}%")
-        elif opm and pct(opm) >= 12: s += 15
-        if roe and pct(roe) >= 18: s += 20; r.append(f"Consistent ROE {pct(roe):.1f}%")
-        if ph and ph >= 0.40: s += 15; r.append(f"Promoter alignment {pct(ph):.1f}%")
-        if dy and dy >= 0.015: s += 10; r.append(f"Dividend {pct(dy):.1f}%")
-
-    elif profile == "mirae_asset":
-        if roe and pct(roe) >= 20: s += 28; r.append(f"Quality ROE {pct(roe):.1f}%")
-        elif roe and pct(roe) >= 15: s += 18
-        if roce and pct(roce) >= 20: s += 22; r.append(f"Strong ROCE {pct(roce):.1f}%")
-        elif roce and pct(roce) >= 12: s += 12
-        if opm and pct(opm) >= 18: s += 25; r.append(f"Sector leader margins {pct(opm):.1f}%")
-        elif opm and pct(opm) >= 12: s += 15
-        if pe and 0 < pe < 40: s += 25
-
-    elif profile == "hdfc_mf":
-        pct_off3 = ((high-price)/high*100) if price and high and high > 0 else 0
-        if pct_off3 >= 20: s += 20; r.append(f"Value opportunity {pct_off3:.0f}% off highs")
-        if pe and 0 < pe < 20: s += 25; r.append(f"Value P/E {pe:.1f}x")
-        elif pe and pe < 30: s += 15
-        if roe and pct(roe) >= 15: s += 25; r.append(f"Quality ROE {pct(roe):.1f}%")
-        elif roe and pct(roe) >= 10: s += 15
-        if dy and dy >= 0.02: s += 15; r.append(f"Dividend support {pct(dy):.1f}%")
-        if debt_free or (de is not None and de < 0.5): s += 15
-
-    elif profile == "anand_rathi":
-        if mc > 10000: s += 20; r.append(f"Large cap safety Rs {mc:.0f}Cr")
-        if dy and dy >= 0.03: s += 30; r.append(f"Strong dividend {pct(dy):.1f}%")
-        elif dy and dy >= 0.02: s += 18; r.append(f"Good dividend {pct(dy):.1f}%")
-        elif dy and dy >= 0.01: s += 8
-        if debt_free or (de is not None and de < 0.3): s += 25; r.append("Capital preservation")
-        if roe and pct(roe) >= 15: s += 15
-        if pe and 0 < pe < 25: s += 10
-
-    elif profile == "ask_investment":
-        if mc > 15000: s += 20; r.append(f"Institutional quality Rs {mc:.0f}Cr")
-        if roe and pct(roe) >= 18: s += 25; r.append(f"Quality ROE {pct(roe):.1f}%")
-        elif roe and pct(roe) >= 12: s += 15
-        if debt_free or (de is not None and de < 0.3): s += 25; r.append("Conservative balance sheet")
-        if dy and dy >= 0.015: s += 15; r.append(f"Dividend {pct(dy):.1f}%")
-        if opm and pct(opm) >= 15: s += 15
-
-    elif profile == "murugappa":
-        if debt_free or (de is not None and de < 0.3): s += 30; r.append("Conservative balance sheet")
-        if dy and dy >= 0.02: s += 25; r.append(f"Dividend history {pct(dy):.1f}%")
-        elif dy and dy >= 0.01: s += 15
-        if opm and pct(opm) >= 15: s += 25; r.append(f"Manufacturing margins {pct(opm):.1f}%")
-        elif opm and pct(opm) >= 10: s += 15
-        if roe and pct(roe) >= 15: s += 20
-
-    elif profile == "manish_kejriwal":
-        if roe and pct(roe) >= 22: s += 30; r.append(f"PE-quality ROE {pct(roe):.1f}%")
-        elif roe and pct(roe) >= 15: s += 18
-        if opm and pct(opm) >= 20: s += 25; r.append(f"Quality margins {pct(opm):.1f}%")
-        elif opm and pct(opm) >= 12: s += 15
-        if ph and ph >= 0.45: s += 25; r.append(f"Management alignment {pct(ph):.1f}%")
-        if debt_free or (de is not None and de < 0.4): s += 20
-
-    elif profile == "phil_fisher":
-        if roe and pct(roe) >= 20: s += 30; r.append(f"Superior ROE {pct(roe):.1f}%")
-        elif roe and pct(roe) >= 15: s += 18
-        if opm and pct(opm) >= 20: s += 25; r.append(f"Growing margins {pct(opm):.1f}%")
-        elif opm and pct(opm) >= 12: s += 15
-        if ph and ph >= 0.40: s += 25; r.append(f"Management aligned {pct(ph):.1f}%")
-        if pe and 0 < pe < 50: s += 20
-        if rev_growth and pct(rev_growth) >= 15: s += 0; r.append(f"Sales growth {pct(rev_growth):.1f}%")
-
-    return {"score": min(s, 100), "reasons": r[:3]}
+    return {"score":min(s,100),"reasons":r[:3]}
 
 
-def get_matching_profiles(d: dict, sector_avgs: dict = None) -> list:
-    results = []
-    for pid, pdata in INVESTOR_PROFILES.items():
-        res = score_profile(d, pid, sector_avgs or {})
-        results.append({
-            "id": pid, "name": pdata["name"], "avatar": pdata["avatar"],
-            "color": pdata["color"], "score": res["score"], "reasons": res["reasons"],
-        })
-    results.sort(key=lambda x: x["score"], reverse=True)
+# ═══════════════════════════════════════════════════════════════════════════════
+# ASSET ALLOCATION — Profile-specific, PE-adjusted
+# ═══════════════════════════════════════════════════════════════════════════════
+PROFILE_ALLOCATION = {
+    "rj":{"base":{"equity":92,"gold":0,"debt":3,"cash":5},"pe_sensitive":False,
+          "logic":"RJ stayed fully invested through all cycles. Maximum equity — he never tried to time the market.","instruments":{"gold":"N/A","debt":"Liquid Fund","cash":"SIP reserve — buy dips"}},
+    "vijay_kedia":{"base":{"equity":95,"gold":0,"debt":0,"cash":5},"pe_sensitive":False,
+          "logic":"Kedia stays almost fully invested. 5% cash is just for opportunistic additions when conviction stocks dip.","instruments":{"gold":"N/A","debt":"N/A","cash":"Reserve for adding to existing positions"}},
+    "porinju":{"base":{"equity":90,"gold":0,"debt":5,"cash":5},"pe_sensitive":False,
+          "logic":"Porinju stays fully invested in smallcaps — he times the business, not the market.","instruments":{"gold":"N/A","debt":"Liquid Fund","cash":"Opportunity fund for beaten-down situations"}},
+    "ashish_kacholia":{"base":{"equity":88,"gold":0,"debt":5,"cash":7},"pe_sensitive":False,
+          "logic":"Kacholia stays largely invested. Small cash reserve for new opportunities as they emerge.","instruments":{"gold":"N/A","debt":"Liquid Fund","cash":"New opportunity reserve"}},
+    "dolly_khanna":{"base":{"equity":85,"gold":0,"debt":5,"cash":10},"pe_sensitive":False,
+          "logic":"Dolly keeps 10% cash to deploy into beaten-down cyclicals when sectors bottom out.","instruments":{"gold":"N/A","debt":"Liquid Fund","cash":"Cyclical opportunity fund"}},
+    "chandrakant_sampat":{"base":{"equity":75,"gold":5,"debt":15,"cash":5},"pe_sensitive":True,
+          "logic":"Sampat preferred conservative allocation. Debt for safety, gold as wealth preservation, equity only in truly exceptional debt-free businesses.","instruments":{"gold":"Sovereign Gold Bond","debt":"Government Securities","cash":"Emergency reserve"}},
+    "radhakishan_damani":{"base":{"equity":85,"gold":0,"debt":10,"cash":5},"pe_sensitive":False,
+          "logic":"RKD concentrated in his best ideas. Very focused portfolio with long holds.","instruments":{"gold":"N/A","debt":"Short Duration Debt","cash":"Opportunistic reserve"}},
+    "raamdeo_agrawal":{"base":{"equity":85,"gold":5,"debt":5,"cash":5},"pe_sensitive":True,
+          "logic":"QGLP framework targets high-quality high-growth stocks — stays invested. Small gold allocation for portfolio balance.","instruments":{"gold":"Sovereign Gold Bond","debt":"Liquid Fund","cash":"QGLP opportunity fund"}},
+    "sanjay_bakshi":{"base":{"equity":80,"gold":0,"debt":10,"cash":10},"pe_sensitive":True,
+          "logic":"Bakshi keeps 10% cash specifically for behavioral mispricing opportunities — great businesses temporarily beaten down.","instruments":{"gold":"N/A","debt":"Short Duration Debt","cash":"Behavioral opportunity fund — deploy only at >20% discount to intrinsic value"}},
+    "kenneth_andrade":{"base":{"equity":82,"gold":0,"debt":8,"cash":10},"pe_sensitive":True,
+          "logic":"Kenneth keeps cash to rotate into sectors at cyclical lows — a core part of his contrarian approach.","instruments":{"gold":"N/A","debt":"Liquid Fund","cash":"Sector rotation fund"}},
+    "manish_kejriwal":{"base":{"equity":85,"gold":0,"debt":10,"cash":5},"pe_sensitive":True,
+          "logic":"PE-style investing requires patience. Small cash reserve for the exceptional opportunity that meets all criteria.","instruments":{"gold":"N/A","debt":"Short Duration Debt","cash":"High-conviction opportunity reserve"}},
+    "buffett":{"base":{"equity":70,"gold":5,"debt":10,"cash":15},"pe_sensitive":True,
+          "logic":"Buffett is famous for holding cash. 'Cash is like oxygen — you don't notice it when you have it, but when you don't, it's the only thing you notice.' Berkshire holds 20%+ cash waiting for the fat pitch.","instruments":{"gold":"Sovereign Gold Bond","debt":"Short Duration Debt Fund","cash":"Buffett's dry powder — deploy only for genuine bargains at 25%+ margin of safety"}},
+    "ben_graham":{"base":{"equity":50,"gold":0,"debt":40,"cash":10},"pe_sensitive":True,
+          "logic":"Graham's timeless rule: never less than 25% or more than 75% in stocks. Move between these bounds based on market valuation. At Nifty PE >25, equity should be at the lower bound.","instruments":{"gold":"N/A","debt":"Medium Duration Bond Fund","cash":"Margin of safety reserve — deploy when P/B drops below 1.5x"}},
+    "peter_lynch":{"base":{"equity":85,"gold":0,"debt":5,"cash":10},"pe_sensitive":True,
+          "logic":"Lynch was fully invested as a fund manager. For personal portfolios, keep 85% invested and 10% cash for PEG <0.5 opportunities.","instruments":{"gold":"N/A","debt":"Liquid Fund","cash":"PEG opportunity fund — deploy when you find PEG <0.5"}},
+    "charlie_munger":{"base":{"equity":82,"gold":0,"debt":3,"cash":15},"pe_sensitive":True,
+          "logic":"Munger concentrated in 5 exceptional businesses. Kept 15% cash for the rare extraordinary opportunity. 'Opportunity cost is the only real cost.'","instruments":{"gold":"N/A","debt":"T-Bills equivalent","cash":"Waiting for the exceptional — Munger deployed only at very high conviction"}},
+    "phil_fisher":{"base":{"equity":88,"gold":0,"debt":5,"cash":7},"pe_sensitive":True,
+          "logic":"Fisher stayed heavily invested in outstanding companies. Small cash reserve for adding to existing positions during dips.","instruments":{"gold":"N/A","debt":"Liquid Fund","cash":"Reserve for adding to best holdings on market weakness"}},
+    "parag_parikh":{"base":{"equity":65,"gold":10,"debt":15,"cash":10},"pe_sensitive":True,
+          "logic":"PPFAS actively manages allocation. Fund holds ~20% cash+debt when markets are expensive. Gold is essential insurance against currency debasement. Deployed aggressively in March 2020 crash.","instruments":{"gold":"Sovereign Gold Bond (SGB) — 2.5% tax-free interest + gold upside","debt":"Liquid Fund or Short Duration","cash":"Deployed aggressively when Nifty PE drops below 16x"}},
+    "marcellus":{"base":{"equity":95,"gold":0,"debt":0,"cash":5},"pe_sensitive":False,
+          "logic":"Marcellus is always fully invested. Mukherjea believes their 12-15 stocks outperform any cash position at any market valuation. No market timing ever.","instruments":{"gold":"N/A","debt":"N/A","cash":"Transaction reserve only"}},
+    "motilal_qglp":{"base":{"equity":85,"gold":5,"debt":5,"cash":5},"pe_sensitive":True,
+          "logic":"QGLP stays invested — great growth businesses outperform even at stretched valuations. Small allocation to gold and debt for balance.","instruments":{"gold":"Sovereign Gold Bond","debt":"Liquid Fund","cash":"QGLP addition fund"}},
+    "nippon_smallcap":{"base":{"equity":90,"gold":0,"debt":5,"cash":5},"pe_sensitive":False,
+          "logic":"Smallcap fund — stays fully invested as timing is impossible in this segment. Diversification is the risk management tool.","instruments":{"gold":"N/A","debt":"Liquid Fund","cash":"New opportunity reserve"}},
+    "mirae_asset":{"base":{"equity":80,"gold":5,"debt":10,"cash":5},"pe_sensitive":True,
+          "logic":"Quality-focused fund with benchmark awareness. Slightly conservative allocation with gold for stability.","instruments":{"gold":"Sovereign Gold Bond","debt":"Short Duration Debt","cash":"Rebalancing reserve"}},
+    "hdfc_mf":{"base":{"equity":70,"gold":5,"debt":15,"cash":10},"pe_sensitive":True,
+          "logic":"Prashant Jain kept 10-15% cash to deploy into contrarian opportunities. 'Being 3 years early is the same as being wrong — but you need cash to stay in the game.'","instruments":{"gold":"Sovereign Gold Bond","debt":"Medium Duration Bond Fund","cash":"Contrarian opportunity fund — deploy into beaten-down quality sectors"}},
+    "enam":{"base":{"equity":80,"gold":5,"debt":10,"cash":5},"pe_sensitive":True,
+          "logic":"Enam's long-term approach keeps most capital in proven businesses. Small gold allocation for wealth preservation.","instruments":{"gold":"Sovereign Gold Bond","debt":"Government Securities","cash":"Reserve for integrity-positive opportunities"}},
+    "nemish_shah":{"base":{"equity":80,"gold":5,"debt":12,"cash":3},"pe_sensitive":True,
+          "logic":"Consumer/pharma focus provides natural defensiveness. Conservative allocation with strong dividend income component.","instruments":{"gold":"Sovereign Gold Bond","debt":"Medium Duration Bond Fund","cash":"Dividend reinvestment fund"}},
+    "white_oak":{"base":{"equity":78,"gold":5,"debt":12,"cash":5},"pe_sensitive":True,
+          "logic":"Goldman Sachs-style discipline. Balanced allocation with emphasis on earnings quality stocks.","instruments":{"gold":"Sovereign Gold Bond","debt":"Short Duration Debt","cash":"Quality opportunity fund"}},
+    "carnelian":{"base":{"equity":85,"gold":0,"debt":5,"cash":10},"pe_sensitive":True,
+          "logic":"Structural sector focus requires staying invested through cycles. Cash for new structural themes as they emerge.","instruments":{"gold":"N/A","debt":"Liquid Fund","cash":"Structural theme opportunity fund"}},
+    "anand_rathi":{"base":{"equity":55,"gold":10,"debt":25,"cash":10},"pe_sensitive":True,
+          "logic":"HNI wealth management — capital preservation first. Heavy debt allocation for income. Gold for inflation protection. Conservative equity bias.","instruments":{"gold":"Sovereign Gold Bond (SGB) + Gold ETF","debt":"AAA-rated bond funds + FD","cash":"Liquid fund for tactical opportunities"}},
+    "ask_investment":{"base":{"equity":65,"gold":8,"debt":20,"cash":7},"pe_sensitive":True,
+          "logic":"PMS approach for HNIs — conservative allocation, quality large caps, regular income from dividends. Wealth preservation as primary objective.","instruments":{"gold":"Sovereign Gold Bond","debt":"Medium Duration Bond Fund + AAA FDs","cash":"Liquid Fund"}},
+    "murugappa":{"base":{"equity":60,"gold":8,"debt":22,"cash":10},"pe_sensitive":True,
+          "logic":"Multi-generational approach — moderate equity, strong debt for income, gold for family wealth preservation. Think in decades, not years.","instruments":{"gold":"Physical Gold + Sovereign Gold Bond","debt":"Government Securities + Corporate Bonds","cash":"Fixed Deposit for emergency + opportunity"}},
+    "default":{"base":{"equity":70,"gold":8,"debt":12,"cash":10},"pe_sensitive":True,
+          "logic":"Balanced allocation adjusted for current market valuation.","instruments":{"gold":"Sovereign Gold Bond","debt":"Short Duration Debt Fund","cash":"Opportunity reserve"}},
+}
+
+def compute_allocation(pid: str, capital: float, npe: float) -> dict:
+    cfg=PROFILE_ALLOCATION.get(pid,PROFILE_ALLOCATION["default"])
+    base=dict(cfg["base"]); mv=get_market_valuation(npe)
+    if cfg["pe_sensitive"]:
+        mod=mv["equity_modifier"]; old_eq=base["equity"]; new_eq=round(old_eq*mod)
+        new_eq=max(min(new_eq,95),25); diff=old_eq-new_eq; base["equity"]=new_eq
+        base["cash"]=base.get("cash",0)+diff
+    total=sum(base.values())
+    pct={k:round(v/total*100,1) for k,v in base.items()}
+    amt={k:round(v/100*capital) for k,v in pct.items()}
+    return {
+        "allocation_pct":pct,"allocation_amt":amt,"equity_capital":amt["equity"],
+        "nifty_pe":npe,"market_valuation":mv,"logic":cfg["logic"],
+        "instruments":cfg["instruments"],
+        "rebalance_triggers":[
+            "If Nifty PE drops below 16x — shift 10% from cash/debt to equity",
+            "If Nifty PE rises above 28x — reduce equity by 15%, park in debt",
+            "Rebalance annually or when any asset class drifts >5% from target",
+        ],
+    }
+
+def get_matching_profiles(stock: dict, avgs: dict) -> list:
+    results=[]
+    for pid in INVESTOR_PROFILES:
+        ps=score_profile(stock,pid,avgs)
+        p=INVESTOR_PROFILES[pid]
+        results.append({"id":pid,"name":p["name"],"avatar":p["avatar"],"color":p["color"],"score":ps["score"],"reasons":ps["reasons"]})
+    results.sort(key=lambda x:x["score"],reverse=True)
     return results[:3]
 
-
-def get_portfolio_allocation(profile_id: str, stocks: list, capital: float) -> dict:
-    profile = INVESTOR_PROFILES.get(profile_id, {})
-    sizing_style = profile.get("sizing_style", "equal_weight")
-    n = len(stocks)
-    if n == 0: return {"positions": []}
-
-    if sizing_style == "very_concentrated":
-        weights = [0.28, 0.20, 0.15] + [max(0.02, (1 - 0.63) / max(n - 3, 1))] * max(n - 3, 0)
-    elif sizing_style == "conviction_weighted":
-        scores = [s.get("profile_score", s["scoring"]["composite"]) for s in stocks]
-        total = sum(scores)
-        weights = [sc / total for sc in scores] if total > 0 else [1/n]*n
+def get_portfolio_allocation(pid: str, stocks: list, equity_capital: float) -> dict:
+    profile=INVESTOR_PROFILES.get(pid,{}); style=profile.get("sizing_style","equal_weight"); n=len(stocks)
+    if n==0: return {"positions":[]}
+    if style=="very_concentrated":
+        raw=[0.30,0.22,0.16,0.10,0.08]+[0.04]*(n-5)
+    elif style=="conviction_weighted":
+        scores=[s.get("profile_score",50) for s in stocks]; total=sum(scores) or n
+        raw=[sc/total for sc in scores]
+    elif style=="market_cap_weighted":
+        mcs=[max((s.get("market_cap") or 1e10),1) for s in stocks]; total=sum(mcs)
+        raw=[mc/total for mc in mcs]
     else:
-        weights = [1/n] * n
-
-    total_w = sum(weights[:n])
-    weights = [w / total_w for w in weights[:n]]
-
-    positions = []
-    for i, (stock, weight) in enumerate(zip(stocks, weights)):
-        amount = capital * weight
-        price = stock.get("current_price") or 0
-        shares = int(amount / price) if price > 0 else 0
-        actual_amount = shares * price if price > 0 else amount
+        raw=[1/n]*n
+    tw=sum(raw[:n]); weights=[w/tw for w in raw[:n]]
+    positions=[]
+    for i,(stock,w) in enumerate(zip(stocks,weights)):
+        price=stock.get("current_price") or 0; amt=equity_capital*w
+        shares=int(amt/price) if price>0 else 0; actual=shares*price if price>0 else amt
         positions.append({
-            "rank": i + 1,
-            "symbol": stock["symbol"],
-            "company_name": stock["company_name"],
-            "sector": stock.get("sector", "Unknown"),
-            "current_price": price,
-            "weight_pct": round(weight * 100, 1),
-            "amount": round(actual_amount),
-            "shares": shares,
-            "profile_score": stock.get("profile_score", stock["scoring"]["composite"]),
-            "conviction": stock["conviction"],
-            "why_included": (stock.get("profile_reasons") or stock["scoring"].get("top_reasons") or ["Meets profile criteria"])[:1][0],
+            "rank":i+1,"symbol":stock["symbol"],"company_name":stock["company_name"],
+            "sector":stock.get("sector","Unknown"),"current_price":price,
+            "weight_pct":round(w*100,1),"amount":round(actual),"shares":shares,
+            "profile_score":stock.get("profile_score",0),"conviction":stock.get("conviction","Watch"),
+            "profile_reasons":stock.get("profile_reasons",[]),"why_included":"","full_analysis":"",
+            "qualifying_metrics":[],"one_liner":"",
         })
-
-    sector_exposure = {}
+    se={}
     for pos in positions:
-        sec = pos["sector"]
-        if sec != "Unknown":
-            sector_exposure[sec] = round(sector_exposure.get(sec, 0) + pos["weight_pct"], 1)
-
-    known = {k: v for k, v in sector_exposure.items() if k != "Unknown"}
-    top_sector = max(known.items(), key=lambda x: x[1])[0] if known else "Diversified"
-    top_stocks = ", ".join([p["symbol"] for p in positions[:3]])
-
-    rationale = (
-        f"This portfolio is built using {profile.get('name')}'s '{profile.get('focus')}' philosophy. "
-        f"Top holdings are {top_stocks}, selected because they score highest on {profile.get('name')}'s specific criteria. "
-        f"Largest sector exposure is {top_sector} at {sector_exposure.get(top_sector, 0):.1f}%. "
-        f"Position sizing follows {sizing_style.replace('_', ' ')} — "
-        f"{'top picks get significantly larger allocations reflecting higher conviction' if sizing_style in ('very_concentrated', 'conviction_weighted') else 'equal allocation across all positions to spread risk'}."
-    )
-
-    entry_strategies = {
-        "rj": "RJ believed in buying on dips aggressively. Consider entering in tranches — invest 50% now, 50% on any 10%+ market dip.",
-        "buffett": "Buffett enters when he finds fair value. Add to winners at reasonable prices. Do not average down on declining businesses.",
-        "marcellus": "Marcellus recommends SIP-style entry over 6-12 months. These are long-term holdings — timing matters less than selection.",
-        "vijay_kedia": "Kedia builds positions slowly. Start with 25% of target allocation, add as conviction grows over 6-9 months.",
-        "ben_graham": "Graham says buy below intrinsic value and sell when price reaches value. Enter only at your calculated margin of safety.",
-        "peter_lynch": "Lynch invested as he found opportunities. Enter when PEG is below 1. Do not wait for the perfect entry.",
-        "parag_parikh": "PPFAS holds cash for opportunities. Consider entering 70% now, keeping 30% for dips.",
-    }
-
+        sec=pos["sector"]
+        if sec!="Unknown": se[sec]=round(se.get(sec,0)+pos["weight_pct"],1)
     return {
-        "positions": positions,
-        "total_stocks": n,
-        "total_capital": capital,
-        "total_deployed": round(sum(p["amount"] for p in positions)),
-        "sector_exposure": sector_exposure,
-        "portfolio_rationale": rationale,
-        "entry_strategy": entry_strategies.get(profile_id, "Invest systematically over 3-6 months to average out entry prices."),
-        "rebalance_note": profile.get("rebalance_style", ""),
+        "positions":positions,"total_stocks":n,"total_capital":equity_capital,
+        "total_deployed":round(sum(p["amount"] for p in positions)),
+        "sector_exposure":se,
+        "portfolio_rationale":f"Portfolio built using {profile.get('name','')}'s '{profile.get('focus','')}' philosophy. {profile.get('philosophy','')[:200]}",
+        "entry_strategy":"Invest systematically over 3-6 months to average entry prices. Never invest the full amount in a single day.",
+        "rebalance_note":"Review annually. Replace stocks where the investment thesis has fundamentally changed. Stay disciplined to the profile's core criteria.",
     }
 
-
-
-# ─── Legend Consensus Portfolio ───────────────────────────────────────────────
-def score_legend_consensus(stock: dict, sector_avgs: dict) -> dict:
-    """Score a stock across ALL profiles — consensus = breadth of agreement."""
-    profile_ids = list(INVESTOR_PROFILES.keys())
-    scores = []
-    for pid in profile_ids:
-        ps = score_profile(stock, pid, sector_avgs)
-        scores.append({"profile_id": pid, "profile_name": INVESTOR_PROFILES[pid]["name"],
-                       "score": ps["score"], "reasons": ps["reasons"]})
-    scores.sort(key=lambda x: x["score"], reverse=True)
-
-    qualifying = [s for s in scores if s["score"] >= 50]
-    strong = [s for s in scores if s["score"] >= 65]
-    avg_score = sum(s["score"] for s in scores) / len(scores) if scores else 0
-
-    # Consensus score: weighted average + breadth bonus
-    breadth_bonus = len(qualifying) * 2  # +2 per qualifying profile
-    consensus_score = min(round(avg_score * 0.6 + breadth_bonus * 0.4), 100)
-
-    tier = "All-Legend" if len(strong) >= 8 else "Strong Consensus" if len(qualifying) >= 5 else "Emerging Consensus" if len(qualifying) >= 3 else None
-
-    return {
-        "consensus_score": consensus_score,
-        "qualifying_profiles": len(qualifying),
-        "strong_profiles": len(strong),
-        "tier": tier,
-        "top_profiles": scores[:4],
-        "all_scores": scores,
-        "avg_score": round(avg_score, 1),
+def explain_stock(stock: dict, pid: str, avgs: dict) -> dict:
+    name=stock.get("company_name",stock.get("symbol","")); sym=stock.get("symbol","")
+    sec=stock.get("sector","Unknown")
+    if sec in ("Unknown","",None): sec=sector_for(sym,"Unknown")
+    sa=avgs.get(sec,{}); p_info=INVESTOR_PROFILES.get(pid,{})
+    def fp(v): return f"{v*100:.1f}%" if v is not None else "N/A"
+    def fn(v,d=1): return f"{v:.{d}f}" if v is not None else "N/A"
+    roe=stock.get("roe"); roce=stock.get("roce"); opm=stock.get("operating_margins")
+    de=stock.get("debt_to_equity"); ph=stock.get("promoter_holding"); pe=stock.get("pe_ratio")
+    mc=(stock.get("market_cap") or 0)/1e7; cr=stock.get("current_ratio")
+    pb=stock.get("pb_ratio"); pct_off=((stock.get("52w_high",0)-(stock.get("current_price") or 0))/(stock.get("52w_high") or 1)*100) if stock.get("52w_high") else 0
+    qm=[]
+    if roe: qm.append({"metric":"ROE","value":fp(roe),"sector_avg":fp(sa.get("roe")) if sa.get("roe") else "N/A","status":"better" if sa.get("roe") and roe>sa["roe"]*1.05 else ("worse" if sa.get("roe") and roe<sa["roe"]*0.90 else "inline"),"learn_id":"roe","explanation":f"ROE of {fp(roe)} means {name} generates ₹{roe*100:.0f} of profit for every ₹100 of shareholder capital — {'above' if sa.get('roe') and roe>sa['roe'] else 'in line with'} the {sec} sector average of {fp(sa.get('roe'))}."})
+    if roce: qm.append({"metric":"ROCE","value":fp(roce),"sector_avg":fp(sa.get("roce")) if sa.get("roce") else "N/A","status":"better" if sa.get("roce") and roce>sa["roce"]*1.05 else ("worse" if sa.get("roce") and roce<sa["roce"]*0.90 else "inline"),"learn_id":"roce","explanation":f"ROCE of {fp(roce)} reflects capital deployment quality across the entire business — sector average is {fp(sa.get('roce'))}."})
+    if opm: qm.append({"metric":"OPM","value":fp(opm),"sector_avg":fp(sa.get("opm")) if sa.get("opm") else "N/A","status":"better" if sa.get("opm") and opm>sa["opm"]*1.05 else ("worse" if sa.get("opm") and opm<sa["opm"]*0.90 else "inline"),"learn_id":"operating-margins","explanation":f"Operating margin of {fp(opm)} means {name} retains {fp(opm)} of every rupee of revenue — sector average is {fp(sa.get('opm'))}."})
+    if de is not None: qm.append({"metric":"D/E","value":f"{de:.2f}x","sector_avg":f"{sa['de']:.2f}x" if sa.get("de") else "N/A","status":"better" if de<0.3 else ("inline" if de<0.7 else "worse"),"learn_id":"debt-equity","explanation":f"D/E of {de:.2f}x indicates {'near debt-free balance sheet' if de<0.2 else 'moderate leverage' if de<0.8 else 'significant leverage'}. Sector avg: {fn(sa.get('de'),2)+'x' if sa.get('de') else 'N/A'}."})
+    if pe: qm.append({"metric":"P/E","value":f"{pe:.1f}x","sector_avg":f"{sa['pe']:.1f}x" if sa.get("pe") else "N/A","status":"better" if sa.get("pe") and pe<sa["pe"]*0.9 else ("worse" if sa.get("pe") and pe>sa["pe"]*1.1 else "inline"),"learn_id":"pe-ratio","explanation":f"P/E of {pe:.1f}x vs sector average of {fn(sa.get('pe'),1)+'x' if sa.get('pe') else 'N/A'} — {'cheap relative to sector' if sa.get('pe') and pe<sa['pe']*0.85 else 'at a premium to sector' if sa.get('pe') and pe>sa['pe']*1.15 else 'in line with sector'}."})
+    if ph: qm.append({"metric":"Promoter","value":fp(ph),"sector_avg":"N/A","status":"better" if ph>=0.50 else ("inline" if ph>=0.35 else "worse"),"learn_id":"promoter-holding","explanation":f"Promoter holding of {fp(ph)} means founders hold {'a majority stake — strong alignment' if ph>=0.51 else 'a significant stake'} with minority shareholders."})
+    analyses={
+        "rj":f"{name} evaluated against RJ's exact criteria: Market cap {fn(mc,0)}Cr {'✓ ≥₹5,000 Cr' if mc>=5000 else '✗ below RJ minimum'}, ROCE {fp(roce)} {'✓ ≥15%' if roce and roce*100>=15 else '✗'}, ROE {fp(roe)} {'✓ ≥15%' if roe and roe*100>=15 else '✗'}, D/E {fn(de,2)+'x' if de else 'N/A'} {'✓ <0.5' if de and de<0.5 else '✗'}, OPM {fp(opm)} {'✓ ≥15%' if opm and opm*100>=15 else '✗'}, Promoter {fp(ph)} {'✓ >50%' if ph and ph>=0.50 else '✗'}. RJ held Titan for 20+ years and Crisil for 15 years — the same patience would apply here if fundamentals hold.",
+        "buffett":f"{name} evaluated against Buffett's exact criteria: ROE {fp(roe)} {'✓ ≥20%' if roe and roe*100>=20 else '✗ below 20% threshold'}, D/E {fn(de,2)+'x' if de else 'N/A'} {'✓ <0.5' if de and de<0.5 else '✗'}, OPM {fp(opm)} {'✓ ≥15% pricing power' if opm and opm*100>=15 else '✗'}, P/E {fn(pe,1)+'x' if pe else 'N/A'} {'✓ <35x' if pe and pe<35 else '✗'}. Buffett would ask: 'Can I understand this business in 5 minutes? Does it have a durable moat? Would I own it for 10 years if markets closed?'",
+        "marcellus":f"{name} evaluated against Marcellus's forensic criteria: ROCE {fp(roce)} {'✓ above 15% minimum' if roce and roce*100>=15 else '✗'} (CCP typically seeks >25%), D/E {fn(de,2)+'x' if de else 'N/A'} {'✓ near-zero debt' if de and de<0.2 else '⚠ has leverage Marcellus would question'}, Promoter pledge {'✓ clean' if stock.get('promoter_pledge',0)==0 else '⚠ pledge exists'}. Marcellus holds 12-15 stocks max and rebalances annually in April.",
+        "ben_graham":f"{name} against Graham's exact screens: P/B {fn(pb,2)+'x' if pb else 'N/A'} {'✓ <1.5x' if pb and pb<1.5 else '✗ above 1.5x limit'}, P/E {fn(pe,1)+'x' if pe else 'N/A'} {'✓ <15x deep value' if pe and pe<15 else '✗ above 15x threshold'}, Current ratio {fn(cr,1)+'x' if cr else 'N/A'} {'✓ ≥2x' if cr and cr>=2 else '✗'}. Graham demanded buying significantly below intrinsic value — the margin of safety is the cornerstone of his entire philosophy.",
+        "vijay_kedia":f"Vijay Kedia's SMILE framework for {name}: S (Small) — {fn(mc,0)}Cr market cap {'✓ small enough for SMILE' if mc<=5000 else '✗ larger than Kedia targets'}, M (Medium experience) — proxied by management track record, L (Large aspiration) — {'shown through expansion trajectory' if opm else 'unclear'}, E (Extra-large TAM) — {sec} sector potential. Kedia does NOT rely on complex ratios — he bets on the jockey (management), not the horse. Promoter holding {fp(ph)} {'reflects strong conviction' if ph and ph>=0.50 else 'is moderate'}.",
+        "charlie_munger":f"{name} against Munger's non-negotiable criteria: ROCE {fp(roce)} {'✓ ≥25% Munger threshold' if roce and roce*100>=25 else '✗ below 25%'}, OPM {fp(opm)} {'✓ ≥25% pricing power' if opm and opm*100>=25 else '✗ below 25%'}, Debt status {'✓ near debt-free' if de and de<0.2 else '✗ has leverage Munger dislikes'}. Munger concentrated in just 5 businesses. He would only include this if ROCE and pricing power both clearly pass.",
     }
+    para=analyses.get(pid,f"{name} selected based on {p_info.get('name','this profile')}'s investment criteria. ROE {fp(roe)}, ROCE {fp(roce)}, OPM {fp(opm)}, D/E {fn(de,2)+'x' if de else 'N/A'}, Promoter {fp(ph)}. {'Strong qualifier' if len([m for m in qm if m.get('status')=='better'])>=2 else 'Partial qualifier'} for this profile.")
+    ps=score_profile(stock,pid,avgs)
+    return {"full_analysis":para,"qualifying_metrics":qm[:6],"one_liner":", ".join(ps["reasons"][:2]) if ps["reasons"] else fp(roe)+" ROE"}
 
-
-def generate_stock_explanation(stock: dict, profile_id: str, sector_avgs: dict) -> dict:
-    """Generate rich, professional explanation of why a stock was selected."""
-    profile = INVESTOR_PROFILES.get(profile_id, {})
-    sector = stock.get("sector", "Unknown")
-    avgs = sector_avgs.get(sector, {})
-    name = stock.get("company_name", stock.get("symbol", ""))
-    symbol = stock.get("symbol", "")
-
-    def pct(v): return v * 100 if v is not None else None
-    def fmt_pct(v): return f"{pct(v):.1f}%" if v is not None else "N/A"
-    def vs_avg(val, avg_key, higher_better=True):
-        avg = avgs.get(avg_key)
-        if val is None or avg is None or avg == 0: return ""
-        diff = ((val - avg) / abs(avg)) * 100
-        symbol_str = "↑" if (higher_better and val > avg) or (not higher_better and val < avg) else "↓"
-        return f"{symbol_str} sector avg {fmt_pct(avg) if avg < 2 else f'{avg:.1f}x'}"
-
-    roe = stock.get("roe"); roce = stock.get("roce"); opm = stock.get("operating_margins")
-    pe = stock.get("pe_ratio"); pb = stock.get("pb_ratio"); de = stock.get("debt_to_equity")
-    rev_g = stock.get("revenue_growth"); earn_g = stock.get("earnings_growth")
-    ph = stock.get("promoter_holding"); price = stock.get("current_price")
-    high = stock.get("52w_high"); mc = (stock.get("market_cap") or 0) / 1e7
-
-    # Build qualifying metrics list
-    qualifying_metrics = []
-
-    if roe:
-        qualifying_metrics.append({
-            "metric": "ROE", "value": fmt_pct(roe), "sector_avg": fmt_pct(avgs.get("roe")),
-            "vs_sector": vs_avg(roe, "roe", True), "learn_id": "roe",
-            "explanation": f"Return on Equity of {fmt_pct(roe)} demonstrates how efficiently {name} generates profit from shareholder capital.",
-            "status": "better" if avgs.get("roe") and roe > avgs["roe"] * 1.05 else "inline",
-        })
-    if roce:
-        qualifying_metrics.append({
-            "metric": "ROCE", "value": fmt_pct(roce), "sector_avg": fmt_pct(avgs.get("roce")),
-            "vs_sector": vs_avg(roce, "roce", True), "learn_id": "roce",
-            "explanation": f"ROCE of {fmt_pct(roce)} reflects the quality of capital deployment across the entire business, not just equity.",
-            "status": "better" if avgs.get("roce") and roce > avgs["roce"] * 1.05 else "inline",
-        })
-    if opm:
-        qualifying_metrics.append({
-            "metric": "Operating Margin", "value": fmt_pct(opm), "sector_avg": fmt_pct(avgs.get("opm")),
-            "vs_sector": vs_avg(opm, "opm", True), "learn_id": "operating-margins",
-            "explanation": f"Operating margin of {fmt_pct(opm)} indicates the company retains {fmt_pct(opm)} of every rupee of revenue as operating profit.",
-            "status": "better" if avgs.get("opm") and opm > avgs["opm"] * 1.05 else "inline",
-        })
-    if de is not None:
-        qualifying_metrics.append({
-            "metric": "Debt/Equity", "value": f"{de:.2f}x", "sector_avg": f"{avgs.get('de', 0):.2f}x" if avgs.get('de') else "N/A",
-            "vs_sector": vs_avg(de, "de", False), "learn_id": "debt-equity",
-            "explanation": f"Debt-to-equity of {de:.2f}x shows {'a near debt-free balance sheet' if de < 0.3 else 'moderate leverage' if de < 1 else 'significant leverage'}.",
-            "status": "better" if avgs.get("de") and de < avgs["de"] * 0.9 else "inline",
-        })
-    if pe:
-        qualifying_metrics.append({
-            "metric": "P/E Ratio", "value": f"{pe:.1f}x", "sector_avg": f"{avgs.get('pe', 0):.1f}x" if avgs.get('pe') else "N/A",
-            "vs_sector": vs_avg(pe, "pe", False), "learn_id": "pe-ratio",
-            "explanation": f"P/E of {pe:.1f}x means investors are paying ₹{pe:.0f} for every ₹1 of annual earnings.",
-            "status": "better" if avgs.get("pe") and pe < avgs["pe"] * 0.9 else "worse" if avgs.get("pe") and pe > avgs["pe"] * 1.1 else "inline",
-        })
-    if rev_g:
-        qualifying_metrics.append({
-            "metric": "Revenue Growth", "value": fmt_pct(rev_g), "sector_avg": fmt_pct(avgs.get("rev_growth")),
-            "vs_sector": vs_avg(rev_g, "rev_growth", True), "learn_id": "revenue-growth",
-            "explanation": f"Revenue growing at {fmt_pct(rev_g)} year-over-year demonstrates the business is expanding its top line.",
-            "status": "better" if rev_g and pct(rev_g) >= 15 else "inline",
-        })
-
-    # Profile-specific full analysis paragraph
-    profile_name = profile.get("name", "")
-    analyses = {
-        "rj": f"{name} aligns with Rakesh Jhunjhunwala's conviction-driven approach to India's growth story. With ROE of {fmt_pct(roe)}, this business demonstrates the kind of capital efficiency RJ demanded before committing capital. He specifically sought companies where promoters had significant skin in the game{f' — promoter holding at {fmt_pct(ph)} reflects this' if ph else ''}. RJ's philosophy was to find businesses riding India's long-term secular growth trends and hold them through volatility. He held Titan for over 20 years and would have applied the same patience here.",
-        "buffett": f"This investment meets Warren Buffett's core criteria for what he calls a 'wonderful company.' The {fmt_pct(roe)} ROE demonstrates consistent ability to generate returns above the cost of capital — Buffett's primary quality filter. {'The near debt-free balance sheet reflects the kind of financial fortress Buffett seeks.' if de is not None and de < 0.3 else ''} Buffett evaluates whether he would be comfortable owning this business for 10 years if markets closed tomorrow. The pricing power implied by {fmt_pct(opm)} operating margins suggests a durable competitive moat.",
-        "marcellus": f"{name} passes Marcellus's rigorous forensic filter — a screen that eliminates 95% of Indian listed companies. Saurabh Mukherjea's Consistent Compounders Portfolio specifically targets businesses with ROCE consistently above 25% and minimal debt. The {fmt_pct(roce)} ROCE places this firmly in what Marcellus calls 'the clean and well-lit room' of Indian businesses. Marcellus holds positions for 3-5 years minimum, relying on earnings compounding rather than multiple expansion to generate returns.",
-        "ben_graham": f"From a Graham perspective, {name} presents the kind of quantitative value opportunity that the 'Father of Value Investing' sought. Graham's Intelligent Investor framework demands a margin of safety — the gap between intrinsic value and market price. {'The P/B of ' + f'{pb:.1f}x' + ' indicates the market values this business at ' + (f'{pb:.1f}x' + ' book value') if pb else ''} Graham would calculate intrinsic value based on normalised earnings power and asset values, investing only when a sufficient discount to this value exists.",
-        "vijay_kedia": f"Vijay Kedia's SMILE framework — Small in size, Medium in experience, Large in aspiration, Extra-large in market potential — is the lens through which this selection must be evaluated. {'With market cap of ₹' + f'{mc:.0f}' + ' Cr, this qualifies as the small/mid cap focus Kedia demands.' if mc < 20000 else ''} Kedia specifically avoids large caps, believing the asymmetric return potential exists only in companies that can grow 10x from their current size. He would examine whether this business addresses an Indian market that is still at early stages of development.",
-        "peter_lynch": f"Peter Lynch's GARP (Growth at Reasonable Price) framework evaluates {name} through the PEG ratio lens. Lynch famously said 'invest in what you know' — businesses with clear, understandable competitive advantages. {f'Revenue growth of {fmt_pct(rev_g)} demonstrates the earnings trajectory Lynch required.' if rev_g else ''} Lynch ran Fidelity Magellan to 29% annual returns by finding companies where growth was consistently underpriced by the market. He looked for boring businesses with exceptional fundamentals that institutional analysts ignored.",
-        "charlie_munger": f"Charlie Munger's investment philosophy centres on what he called 'wonderful businesses at fair prices' — companies with such durable competitive advantages that they can compound capital at high rates for decades without requiring additional capital. The {fmt_pct(roce)} ROCE is the metric Munger cared about most, as it measures raw business efficiency. Munger held extraordinarily few positions, demanding that each one meet an exceptionally high bar for business quality and management integrity.",
-        "parag_parikh": f"Parag Parikh Financial Advisory Services applies a behavioural finance lens to portfolio construction. PPFAS specifically seeks owner-operators — businesses where promoters have significant equity stake and think like owners, not employees. {f'The promoter holding of {fmt_pct(ph)} reflects this alignment.' if ph else ''} The fund is known for its low turnover and willingness to hold through market volatility, an approach that requires genuine conviction in the underlying business quality.",
-    }
-
-    full_analysis = analyses.get(profile_id,
-        f"{name} was selected based on its strong performance against {profile_name}'s investment criteria. The key metrics that qualified this stock demonstrate the business quality this investing style demands."
-    )
-
-    return {
-        "full_analysis": full_analysis,
-        "qualifying_metrics": qualifying_metrics[:5],
-        "one_liner": f"Selected for {fmt_pct(roe)} ROE{', ' + fmt_pct(opm) + ' OPM' if opm else ''}{', low debt' if de is not None and de < 0.3 else ''}",
-    }
-
-
-def generate_why_not(profile_id: str, near_misses: list, sector_avgs: dict) -> list:
-    """Explain why stocks almost made it but didn't qualify."""
-    results = []
-    for stock in near_misses[:3]:
-        name = stock.get("company_name", stock.get("symbol", ""))
-        symbol = stock.get("symbol", "")
-        ps = score_profile(stock, profile_id, sector_avgs)
-        score = ps["score"]
-
-        # Find the weakest metric
-        roe = stock.get("roe"); roce = stock.get("roce")
-        de = stock.get("debt_to_equity"); opm = stock.get("operating_margins")
-        pe = stock.get("pe_ratio"); ph = stock.get("promoter_holding")
-
-        def pct(v): return v * 100 if v else None
-
-        reasons = []
-        if profile_id == "buffett":
-            if roe and pct(roe) < 15: reasons.append(f"ROE of {pct(roe):.1f}% falls below Buffett's 20% threshold for consistent capital efficiency")
-            if de and de > 0.5: reasons.append(f"Debt/Equity of {de:.1f}x exceeds Buffett's preference for near debt-free balance sheets")
-            if pe and pe > 35: reasons.append(f"P/E of {pe:.1f}x suggests the market has already priced in the quality premium")
-        elif profile_id == "marcellus":
-            if de and de > 0.3: reasons.append(f"Debt/Equity of {de:.1f}x fails Marcellus's zero-debt forensic filter")
-            if roce and pct(roce) < 20: reasons.append(f"ROCE of {pct(roce):.1f}% below Marcellus's 25% minimum threshold")
-        elif profile_id == "rj":
-            if ph and ph < 0.35: reasons.append(f"Promoter holding of {pct(ph):.1f}% below RJ's conviction threshold")
-            if roe and pct(roe) < 18: reasons.append(f"ROE of {pct(roe):.1f}% insufficient for RJ's growth compounder criteria")
-        else:
-            if not reasons:
-                reasons.append(f"Composite score of {score}/100 did not meet the minimum threshold for this profile")
-
-        if reasons:
-            results.append({
-                "symbol": symbol,
-                "company_name": name,
-                "score": score,
-                "reason": reasons[0],
-                "learn_id": "roe" if "ROE" in (reasons[0] if reasons else "") else "debt-equity" if "Debt" in (reasons[0] if reasons else "") else "roce",
-            })
+def why_not_list(pid: str, near_misses: list, avgs: dict) -> list:
+    results=[]
+    for stock in near_misses[:4]:
+        name=stock.get("company_name",stock.get("symbol","")); sym=stock.get("symbol","")
+        ps=score_profile(stock,pid,avgs)
+        def p(v): return v*100 if v is not None else None
+        roe=stock.get("roe"); de=stock.get("debt_to_equity"); pe=stock.get("pe_ratio")
+        roce=stock.get("roce"); opm=stock.get("operating_margins"); ph=stock.get("promoter_holding")
+        mc=(stock.get("market_cap") or 0)/1e7; pb=stock.get("pb_ratio"); cr=stock.get("current_ratio")
+        reasons=[]
+        if pid in ("rj","buffett","manish_kejriwal","white_oak","raamdeo_agrawal","motilal_qglp"):
+            if roe and p(roe)<20: reasons.append(f"ROE of {p(roe):.1f}% below the 20% quality threshold this profile demands")
+            if de and de>0.5: reasons.append(f"D/E of {de:.2f}x exceeds the conservative balance sheet requirement of this profile")
+        if pid=="marcellus":
+            if de and de>0.2: reasons.append(f"D/E of {de:.2f}x fails Marcellus's near-zero debt requirement")
+            if roce and p(roce)<15: reasons.append(f"ROCE of {p(roce):.1f}% below the 15% consistency threshold Marcellus demands")
+        if pid in ("chandrakant_sampat","enam"):
+            if de and de>0.15: reasons.append(f"D/E of {de:.2f}x — debt-free is a non-negotiable criterion for this profile")
+        if pid in ("vijay_kedia","porinju","ashish_kacholia","nippon_smallcap"):
+            if mc>15000: reasons.append(f"Market cap of ₹{mc:.0f}Cr too large for this small-cap focused profile")
+        if pid=="ben_graham":
+            if pb and pb>2: reasons.append(f"P/B of {pb:.2f}x above Graham's strict 1.5x limit")
+            if pe and pe>20: reasons.append(f"P/E of {pe:.1f}x above Graham's 15x threshold")
+        if pid=="charlie_munger":
+            if roce and p(roce)<25: reasons.append(f"ROCE of {p(roce):.1f}% below Munger's non-negotiable 25% threshold")
+            if opm and p(opm)<25: reasons.append(f"OPM of {p(opm):.1f}% below Munger's 25% pricing power requirement")
+        if not reasons: reasons.append(f"Composite profile score of {ps['score']}/100 did not clear the minimum threshold for inclusion")
+        learn_id="roe" if any("ROE" in r for r in reasons) else "debt-equity" if any("D/E" in r or "debt" in r.lower() for r in reasons) else "pe-ratio"
+        results.append({"symbol":sym,"company_name":name,"score":ps["score"],"reason":reasons[0],"learn_id":learn_id})
     return results
 
+def score_consensus(stock: dict, avgs: dict) -> dict:
+    scores=[]
+    for pid in INVESTOR_PROFILES:
+        ps=score_profile(stock,pid,avgs)
+        scores.append({"profile_id":pid,"profile_name":INVESTOR_PROFILES[pid]["name"],"score":ps["score"],"reasons":ps["reasons"]})
+    scores.sort(key=lambda x:x["score"],reverse=True)
+    qualifying=[s for s in scores if s["score"]>=40]; strong=[s for s in scores if s["score"]>=60]
+    avg=sum(s["score"] for s in scores)/len(scores) if scores else 0
+    breadth=len(qualifying)*2.5; consensus=min(round(avg*0.55+breadth*0.45),100)
+    tier="All-Legend" if len(strong)>=8 else ("Strong Consensus" if len(qualifying)>=5 else ("Emerging Consensus" if len(qualifying)>=3 else None))
+    return {"consensus_score":consensus,"qualifying_profiles":len(qualifying),"strong_profiles":len(strong),"tier":tier,"top_profiles":scores[:4],"avg_score":round(avg,1)}
 
-
-def normalize_scoring(scoring: dict) -> dict:
-    """Ensure scoring has both old and new format fields."""
-    if not scoring: return scoring
-    # If it has old sub_scores format (Buffett/RJ/Quality/Value), convert to new
-    sub = scoring.get("sub_scores", [])
-    if sub and isinstance(sub[0], dict):
-        labels = [s.get("label","") for s in sub]
-        if "Buffett" in labels:
-            # Old format - rebuild from scores dict if available
-            scores = scoring.get("scores", {})
-            if scores:
-                scoring = dict(scoring)
-                scoring["sub_scores"] = [{"label": k.capitalize(), "score": v} for k,v in scores.items()]
-    return scoring
-
-def build_entry(symbol, raw, sector_avgs=None):
-    if sector_avgs is None: sector_avgs = {}
-    # Ensure sector is set correctly
-    if not raw.get("sector") or raw.get("sector") == "Unknown":
-        raw["sector"] = NSE_SECTOR_MAP.get(symbol, "Unknown")
-    scoring = score_stock(raw, sector_avgs)
-    matching_profiles = get_matching_profiles(raw, sector_avgs)
-    sector_comparison = get_sector_comparison(raw, sector_avgs)
+def build_entry(symbol, raw, avgs=None):
+    if avgs is None: avgs={}
+    raw["sector"]=sector_for(symbol,raw.get("sector","Unknown"))
+    scoring=score_stock(raw,avgs); sc=get_sector_comp(raw,avgs); mp=get_matching_profiles(raw,avgs)
     return {
-        "symbol": symbol,
-        "company_name": raw.get("company_name", symbol),
-        "sector": raw.get("sector", "Unknown"),
-        "industry": raw.get("industry", "Unknown"),
-        "description": raw.get("description", ""),
-        "website": raw.get("website", ""),
-        "employees": raw.get("employees"),
-        "current_price": raw.get("current_price"),
-        "price_change_pct": raw.get("price_change_pct"),
-        "market_cap": raw.get("market_cap"),
-        "52w_high": raw.get("52w_high"),
-        "52w_low": raw.get("52w_low"),
-        "avg_volume": raw.get("avg_volume"),
-        "pe_ratio": raw.get("pe_ratio"),
-        "pb_ratio": raw.get("pb_ratio"),
-        "ev_ebitda": raw.get("ev_ebitda"),
-        "peg_ratio": raw.get("peg_ratio"),
-        "book_value": raw.get("book_value"),
-        "roe": raw.get("roe"),
-        "roa": raw.get("roa"),
-        "roce": raw.get("roce"),
-        "debt_to_equity": raw.get("debt_to_equity"),
-        "operating_margins": raw.get("operating_margins"),
-        "net_margins": raw.get("net_margins"),
-        "revenue_growth": raw.get("revenue_growth"),
-        "earnings_growth": raw.get("earnings_growth"),
-        "current_ratio": raw.get("current_ratio"),
-        "quick_ratio": raw.get("quick_ratio"),
-        "interest_coverage": raw.get("interest_coverage"),
-        "dividend_yield": raw.get("dividend_yield"),
-        "eps": raw.get("eps"),
-        "beta": raw.get("beta"),
-        "fcf": raw.get("fcf"),
-        "promoter_holding": raw.get("promoter_holding"),
-        "institutional_holding": raw.get("institutional_holding"),
-        "analyst_recommendation": raw.get("analyst_recommendation"),
-        "target_price": raw.get("target_price"),
-        "num_analysts": raw.get("num_analysts"),
-        "quarterly_revenue": raw.get("quarterly_revenue", []),
-        "quarterly_profit": raw.get("quarterly_profit", []),
-        "annual_revenue": raw.get("annual_revenue", []),
-        "annual_profit": raw.get("annual_profit", []),
-        "pros": raw.get("pros", []),
-        "cons": raw.get("cons", []),
-        "data_source": raw.get("data_source", "unknown"),
-        "scoring": scoring,
-        "conviction": conviction_tier(scoring["composite"]),
-        "matching_profiles": matching_profiles,
-        "sector_comparison": sector_comparison,
-        "cached_at": datetime.now().isoformat(),
+        "symbol":symbol,
+        **{k:raw.get(k) for k in ["company_name","sector","industry","description","website","employees",
+           "current_price","price_change_pct","market_cap","52w_high","52w_low","avg_volume",
+           "pe_ratio","pb_ratio","ev_ebitda","peg_ratio","book_value","roe","roa","roce",
+           "debt_to_equity","operating_margins","net_margins","revenue_growth","earnings_growth",
+           "current_ratio","quick_ratio","interest_coverage","dividend_yield","eps","beta","fcf",
+           "revenue","ebitda","promoter_holding","promoter_pledge","institutional_holding",
+           "analyst_recommendation","target_price","num_analysts",
+           "quarterly_revenue","quarterly_profit","annual_revenue","annual_profit",
+           "pros","cons","data_source"]},
+        "scoring":scoring,"conviction":conviction(scoring["composite"]),
+        "matching_profiles":mp,"sector_comparison":sc,"cached_at":datetime.now().isoformat(),
     }
 
 
-# ─── Education content ────────────────────────────────────────────────────────
-EDUCATION_CONTENT = {
-    "metrics": [
-        {
-            "id": "pe-ratio", "title": "Price to Earnings (P/E) Ratio",
-            "category": "metrics", "difficulty": "beginner", "read_time": 2,
-            "summary": "How much you pay for every rupee of profit a company earns.",
-            "content": "The P/E ratio tells you how expensive a stock is relative to its earnings. If a company earns Rs 10 per share and the stock costs Rs 200, the P/E is 20x — you are paying 20 rupees for every 1 rupee of annual profit.\n\nA lower P/E generally means the stock is cheaper. But cheap is not always good — a low P/E can mean a business is declining.\n\nIn India, the Nifty 50 average P/E is around 20-22x in normal times. Consumer companies like Nestle trade at 70-80x because investors expect consistent growth for decades. PSU banks trade at 5-8x because growth is slower.\n\nThe key insight: always compare P/E to the company's own history AND to sector peers. A pharma company at P/E 30x might be cheap while a bank at P/E 15x might be expensive — it depends on the sector norm.",
-            "example_stock": "NESTLEIND",
-            "example_text": "Nestle India trades at ~70x P/E because it has grown earnings consistently for 30 years. Investors pay a premium for that predictability.",
-            "watch_out": "A very low P/E can be a value trap — the market might be pricing in declining earnings ahead.",
-            "related": ["pb-ratio", "peg-ratio", "ev-ebitda"],
-        },
-        {
-            "id": "roe", "title": "Return on Equity (ROE)",
-            "category": "metrics", "difficulty": "beginner", "read_time": 2,
-            "summary": "How efficiently a company uses shareholder money to generate profit.",
-            "content": "ROE measures how much profit a company generates from the money shareholders have invested. If shareholders put in Rs 100 and the company earns Rs 20 profit, ROE is 20%.\n\nROE above 20% is generally excellent. It means the company is a money-making machine — for every Rs 100 invested, it generates Rs 20 of profit every year.\n\nWarren Buffett specifically looks for companies with consistently high ROE without excessive debt. Companies like Asian Paints and HDFC Bank have maintained 20%+ ROE for decades — this is rare and extremely valuable.\n\nImportant: high ROE achieved through high debt is dangerous. A company borrowing heavily can artificially inflate ROE. Always check debt levels alongside ROE.",
-            "example_stock": "ASIANPAINT",
-            "example_text": "Asian Paints has maintained ROE above 25% for over 15 years with virtually zero debt — a hallmark of genuine business quality.",
-            "watch_out": "ROE inflated by debt (high D/E ratio) is misleading. Always check ROCE alongside ROE.",
-            "related": ["roce", "debt-equity", "return-on-assets"],
-        },
-        {
-            "id": "roce", "title": "Return on Capital Employed (ROCE)",
-            "category": "metrics", "difficulty": "intermediate", "read_time": 2,
-            "summary": "The purest measure of how well a business uses all its capital.",
-            "content": "ROCE is considered a better quality measure than ROE because it accounts for ALL capital — both equity and debt. It answers: for every rupee the business uses (from any source), how much profit does it generate?\n\nROCE above 20% consistently is the hallmark of truly great businesses. Marcellus Investment's entire strategy is built around finding companies with ROCE above 25% for 10 consecutive years.\n\nThe difference between ROE and ROCE: ROE can be gamed by taking on debt. ROCE cannot be faked — it measures raw business efficiency regardless of financing structure.\n\nCharlie Munger once said: show me a business with 25% ROCE sustained over 20 years, and I will show you a business that has a real competitive moat.",
-            "example_stock": "PIDILITIND",
-            "example_text": "Pidilite (Fevicol) has maintained ROCE above 30% for decades — because its brand moat allows pricing power with minimal capital reinvestment.",
-            "watch_out": "Capital-intensive businesses like steel and cement will naturally have lower ROCE. Always compare within the same sector.",
-            "related": ["roe", "operating-margins", "moat"],
-        },
-        {
-            "id": "debt-equity", "title": "Debt to Equity Ratio",
-            "category": "metrics", "difficulty": "beginner", "read_time": 2,
-            "summary": "How much debt a company has compared to shareholder funds.",
-            "content": "The D/E ratio compares total debt to shareholders equity. A D/E of 0.5 means the company has Rs 50 of debt for every Rs 100 of shareholder money.\n\nDebt is not always bad — for infrastructure companies and banks, leverage is part of the business model. But for consumer and technology companies, a clean balance sheet (D/E below 0.3) is a strong quality signal.\n\nThe biggest Indian business failures in the last decade — IL&FS, DHFL, Reliance Communications — all had one thing in common: extreme leverage.\n\nChandrakant Sampat, India's original value investor, made debt-free balance sheets his single non-negotiable criterion. He believed that debt-free companies could survive any downturn and emerge stronger.",
-            "example_stock": "HDFCBANK",
-            "example_text": "HDFC Bank carries significant debt (it is a bank — that is the business model), but manages it with exceptional discipline. For banks, look at NPAs and Capital Adequacy instead of D/E.",
-            "watch_out": "Zero debt is not always optimal — some debt can improve returns. The question is whether the business generates returns above its cost of debt.",
-            "related": ["roe", "interest-coverage", "current-ratio"],
-        },
-        {
-            "id": "operating-margins", "title": "Operating Profit Margin (OPM)",
-            "category": "metrics", "difficulty": "beginner", "read_time": 2,
-            "summary": "What percentage of revenue becomes operating profit.",
-            "content": "Operating margin tells you how much profit a business keeps from its revenues after paying all operating costs (but before interest and taxes).\n\nA 20% OPM means for every Rs 100 in revenue, Rs 20 is operating profit. The remaining Rs 80 went to raw materials, employees, rent, and other costs.\n\nHigh and stable operating margins indicate pricing power — the company can charge what it wants without customers switching. Nestle India, Asian Paints, and Pidilite consistently maintain 20%+ OPM because of their brand strength.\n\nImproving margins over time is a very bullish signal — it means the business is scaling efficiently or gaining pricing power.",
-            "example_stock": "BRITANNIA",
-            "example_text": "Britannia increased OPM from 5% in 2015 to over 15% by 2022 — a margin expansion story that created enormous shareholder value.",
-            "watch_out": "Compare margins within sectors. A 5% margin is great for a commodity trader but terrible for a software company.",
-            "related": ["roe", "roce", "revenue-growth"],
-        },
-        {
-            "id": "pb-ratio", "title": "Price to Book (P/B) Ratio",
-            "category": "metrics", "difficulty": "intermediate", "read_time": 2,
-            "summary": "What premium the market charges over the company's net assets.",
-            "content": "Book value is what shareholders would theoretically get if the company sold all its assets and paid all its debts today. P/B compares the market price to this book value.\n\nP/B below 1 means the market values the company less than its net assets — often a signal of deep value or serious business problems.\n\nBenjamin Graham specifically looked for stocks trading below 1.5x book value as part of his margin of safety framework.\n\nFor asset-heavy businesses like banks and manufacturing, P/B is meaningful. For software companies with few physical assets, P/B is less relevant — their value lies in intellectual property and people, not balance sheet assets.",
-            "example_stock": "SBIN",
-            "example_text": "SBI has historically traded between 0.8x and 1.5x book value — reflecting investor uncertainty about NPAs. When PSU banks trade below book, it has historically been a good entry point.",
-            "watch_out": "A low P/B can mean the assets are impaired (loans that won't be repaid, inventory that won't be sold). The quality of assets matters as much as the price.",
-            "related": ["pe-ratio", "graham-number", "margin-of-safety"],
-        },
-        {
-            "id": "peg-ratio", "title": "PEG Ratio",
-            "category": "metrics", "difficulty": "intermediate", "read_time": 2,
-            "summary": "P/E ratio adjusted for growth — finds growth stocks at reasonable prices.",
-            "content": "The PEG ratio was popularized by Peter Lynch. It divides the P/E ratio by the earnings growth rate to find growth stocks that are not overvalued.\n\nPEG = P/E divided by Earnings Growth Rate\n\nA PEG below 1 means you are paying less than the growth justifies — Lynch considered this the sweet spot. A PEG above 2 means you are paying a significant premium for expected growth.\n\nExample: A stock with P/E of 30x growing earnings at 35% per year has a PEG of 0.86 — reasonable. A stock with P/E of 50x growing at 15% has a PEG of 3.3 — expensive.\n\nLynch used this to find companies like Dunkin Donuts and Taco Bell early — boring businesses with consistent growth that nobody was excited about.",
-            "example_stock": "BAJFINANCE",
-            "example_text": "Bajaj Finance historically traded at high P/E multiples that seemed expensive, but its consistently high earnings growth kept PEG reasonable.",
-            "watch_out": "PEG relies on growth estimates which can be wrong. Be conservative with growth assumptions.",
-            "related": ["pe-ratio", "earnings-growth", "peter-lynch"],
-        },
-        {
-            "id": "ev-ebitda", "title": "EV/EBITDA",
-            "category": "metrics", "difficulty": "advanced", "read_time": 3,
-            "summary": "Enterprise value relative to operating earnings — the professional's valuation metric.",
-            "content": "EV/EBITDA is widely used by professional investors and investment bankers because it is capital-structure neutral — it does not matter if the company is funded by debt or equity.\n\nEV (Enterprise Value) = Market Cap + Total Debt - Cash. This represents the true cost of buying the whole business.\n\nEBITDA = Earnings Before Interest, Tax, Depreciation and Amortization. A proxy for operating cash generation.\n\nEV/EBITDA below 10x is generally considered cheap, above 20x expensive — but varies hugely by sector and growth rate.\n\nWhy better than P/E: P/E can be distorted by interest costs and tax structures. EV/EBITDA cuts through these to show the underlying business value.",
-            "example_stock": "TATAMOTORS",
-            "example_text": "Auto companies with high debt can look cheap on P/E but expensive on EV/EBITDA once debt is accounted for. EV/EBITDA gives the honest picture.",
-            "watch_out": "EBITDA ignores capex requirements. For capital-intensive businesses, EV/FCF (Free Cash Flow) is even better.",
-            "related": ["pe-ratio", "free-cash-flow", "enterprise-value"],
-        },
-        {
-            "id": "dividend-yield", "title": "Dividend Yield",
-            "category": "metrics", "difficulty": "beginner", "read_time": 2,
-            "summary": "Annual cash returned to shareholders as a percentage of stock price.",
-            "content": "Dividend yield measures the annual dividend payment as a percentage of the current stock price. A Rs 200 stock paying Rs 10 annual dividend has a 5% yield.\n\nHigh dividend yield stocks are favored by income investors — retirees and conservative investors who need regular cash flow.\n\nBut yield chasing can be dangerous. A very high yield (above 6-7%) sometimes signals that investors expect the dividend to be cut — the stock price has fallen because of business problems.\n\nThe best dividend stocks are ones that consistently grow their dividend over time — companies like ITC, Coal India, and Power Grid have done this for years.",
-            "example_stock": "COALINDIA",
-            "example_text": "Coal India has maintained dividend yields of 5-8% for years, making it a favourite of income investors despite questions about long-term coal demand.",
-            "watch_out": "A dividend yield that looks abnormally high is often a warning sign — check if the company can sustain the payout from its free cash flow.",
-            "related": ["free-cash-flow", "payout-ratio", "income-investing"],
-        },
-    ],
-    "strategies": [
-        {
-            "id": "value-investing", "title": "Value Investing — Buy What Others Ignore",
-            "category": "strategies", "difficulty": "beginner", "read_time": 4,
-            "summary": "The art of buying good businesses at prices below what they are actually worth.",
-            "content": "Value investing was invented by Benjamin Graham and perfected by Warren Buffett. The core idea is simple: stocks are not just ticker symbols — they represent ownership in real businesses. And like any asset, businesses can be bought cheaply or expensively.\n\nThe market is not always rational. Fear causes prices to drop below intrinsic value. Greed causes prices to rise above it. Value investors profit from this irrationality by buying when others are fearful and selling when others are greedy.\n\nIn India, the best value opportunities have historically come during market crashes (2008, 2020), sector downturns (IT in 2001, pharma in 2016), and company-specific bad news that turns out to be temporary.\n\nRamesh Damani famously bought VST Industries (cigarettes) and Aptech when they were deeply out of favour. Both went on to deliver multibagger returns.\n\nKey principles:\n1. Always buy with a margin of safety — pay less than intrinsic value\n2. Think like a business owner, not a trader\n3. Be patient — value takes time to be recognized\n4. Distinguish between temporary problems and permanent ones",
-            "related": ["pe-ratio", "pb-ratio", "margin-of-safety"],
-        },
-        {
-            "id": "quality-investing", "title": "Quality Investing — Great Businesses at Fair Prices",
-            "category": "strategies", "difficulty": "intermediate", "read_time": 4,
-            "summary": "Finding businesses with durable competitive advantages and holding them for decades.",
-            "content": "Quality investing evolved from value investing. While Graham looked for cheap businesses, Buffett (influenced by Charlie Munger) evolved to paying fair prices for genuinely great businesses.\n\nThe insight: a great business at a fair price is better than a mediocre business at a cheap price. Compounding works best when the underlying business is excellent.\n\nWhat makes a quality business in India?\n- Consistent high ROCE (above 20%) for 10+ years\n- Pricing power — can raise prices without losing customers\n- Low debt — does not need external capital to grow\n- Strong management with integrity and long tenure\n- Large addressable market with long growth runway\n\nMarcellus Investment's CCP (Consistent Compounders Portfolio) is built entirely on quality investing principles. Their universe of stocks that pass all their filters is surprisingly small — fewer than 30 companies in all of India.",
-            "related": ["roce", "moat", "marcellus"],
-        },
-        {
-            "id": "growth-investing", "title": "Growth Investing — Riding the Earnings Tide",
-            "category": "strategies", "difficulty": "intermediate", "read_time": 3,
-            "summary": "Investing in companies growing faster than the market and holding through the growth phase.",
-            "content": "Growth investors focus on businesses growing revenue and earnings significantly faster than the market. They are willing to pay premium valuations (high P/E) because fast compounding justifies higher prices.\n\nThe key metric for growth investors is earnings growth rate. Peter Lynch looked for companies growing earnings at 20-25% per year with PEG ratios below 1.\n\nIn India, the biggest growth stories of the last decade include Bajaj Finance (NBFC growth), HDFC Bank (banking penetration), Asian Paints (urbanization), and recently Zomato/Nykaa (digital consumption).\n\nThe risk: growth can disappoint. A company priced for 30% growth trading at 50x P/E that delivers only 15% growth will see its stock fall sharply — the multiple compresses AND earnings disappoint.",
-            "related": ["peg-ratio", "earnings-growth", "peter-lynch"],
-        },
-        {
-            "id": "moat", "title": "Competitive Moats — What Protects a Business",
-            "category": "strategies", "difficulty": "intermediate", "read_time": 4,
-            "summary": "Why some businesses can earn high returns indefinitely while others cannot.",
-            "content": "Warren Buffett popularized the concept of the economic moat — a durable competitive advantage that protects a business from competitors, just like a castle moat protects from invaders.\n\nThe 5 types of moats:\n\n1. Brand moat: Customers pay premium because they trust the brand. Fevicol (Pidilite) — no contractor will risk using a cheaper alternative because failure is too costly.\n\n2. Switching costs: Once adopted, it is painful to switch. Tally accounting software — millions of businesses have years of data in Tally, making migration expensive.\n\n3. Network effects: More users make the product more valuable. NSE — more traders attract more liquidity, which attracts more traders.\n\n4. Cost advantage: Structurally lower costs than competitors. DMart — EDLP model, owned stores, no frills, passes savings to customers.\n\n5. Regulatory moat: Government licences or approvals protect the business. CAMS — processes 70% of mutual fund transactions in India because of SEBI approvals.",
-            "related": ["quality-investing", "roce", "buffett"],
-        },
-    ],
-    "beginners": [
-        {
-            "id": "what-is-a-stock", "title": "What is a Stock?",
-            "category": "beginners", "difficulty": "beginner", "read_time": 2,
-            "summary": "Owning a stock means owning a small piece of a real business.",
-            "content": "When you buy a share of Reliance Industries, you become a part-owner of one of India's largest businesses — its refineries, retail stores, Jio network, and everything else.\n\nA stock is not just a price on a screen. It represents real ownership in a real business with real assets, employees, customers, and profits.\n\nCompanies issue shares to raise money from the public. In return, shareholders own a proportional part of the business and share in its profits (through dividends) and growth (through rising stock price).\n\nThe NSE (National Stock Exchange) and BSE (Bombay Stock Exchange) are the marketplaces where these shares are bought and sold every day.\n\nWhy stocks beat other investments over time: businesses generate real economic value. A good business earns returns on capital that exceed inflation. Over 20-30 years, owning great businesses is the most powerful way to build wealth.",
-            "related": ["market-cap", "how-markets-work", "getting-started"],
-        },
-        {
-            "id": "market-cap", "title": "What is Market Capitalisation?",
-            "category": "beginners", "difficulty": "beginner", "read_time": 2,
-            "summary": "The total value the market places on a company.",
-            "content": "Market capitalisation (market cap) is simply the total value of all shares of a company.\n\nMarket Cap = Share Price multiplied by Total Number of Shares\n\nIf Reliance has 1,350 crore shares and the price is Rs 2,800, the market cap is Rs 37,80,000 crore — or about Rs 37.8 lakh crore.\n\nIn India, companies are broadly classified by market cap:\n- Large Cap: Top 100 companies by market cap (above Rs 20,000 Cr)\n- Mid Cap: Companies ranked 101-250 (Rs 5,000-20,000 Cr)\n- Small Cap: Companies ranked below 250 (below Rs 5,000 Cr)\n\nSmall cap stocks can grow faster (more room to grow) but are riskier (less stable, less liquid). Large caps are safer but can be slower movers.",
-            "related": ["what-is-a-stock", "large-mid-small-cap", "liquidity"],
-        },
-        {
-            "id": "how-to-read-annual-report", "title": "How to Read an Annual Report in 10 Minutes",
-            "category": "beginners", "difficulty": "intermediate", "read_time": 5,
-            "summary": "The 5 things you must check in every annual report before investing.",
-            "content": "Every listed company in India must publish an annual report. Most retail investors never read them. This is your edge.\n\n1. The MD's Letter to Shareholders (5 minutes): Read what the management is saying about the business, challenges, and outlook. Is the tone honest? Are they acknowledging problems or just celebrating wins?\n\n2. The P&L Statement: Is revenue growing? Are margins expanding or contracting? Is profit growing faster than revenue (good) or slower (bad)?\n\n3. The Balance Sheet: Is debt increasing every year? Is cash building up? Are receivables growing faster than revenue (warning sign)?\n\n4. The Cash Flow Statement: The most honest financial statement. Is the company actually collecting cash from its operations? A company can show accounting profits while being cash flow negative — always check.\n\n5. Related Party Transactions: Are there large transactions with promoter-owned companies? This is how money gets siphoned out. Keep this small.\n\nBonus: The auditor's notes — any qualifications in the audit report are serious warning signs.",
-            "related": ["financial-statements", "red-flags", "promoter-holding"],
-        },
-    ],
+EDUCATION = {
+"metrics":[
+{"id":"pe-ratio","title":"Price to Earnings (P/E) Ratio","category":"metrics","difficulty":"beginner","read_time":3,"summary":"How much you pay for every rupee of profit a company earns.","content":"P/E = Price / EPS. A P/E of 20x means you pay Rs20 for every Rs1 of annual profit. Lower is generally cheaper but context matters - always compare within the same sector.\n\nBenjamin Graham required P/E below 15x. Warren Buffett pays up to 30-35x for exceptional businesses. Raamdeo Agrawal uses PEG (P/E divided by growth rate) - targets below 1.5x.\n\nNifty 50 historical average: 20-22x. Below 15x = historically cheap. Above 28x = historically expensive.","example_stock":"NESTLEIND","watch_out":"Very low P/E can be a value trap. Always ask why it is cheap.","related":["pb-ratio","peg-ratio","ev-ebitda"]},
+{"id":"roe","title":"Return on Equity (ROE)","category":"metrics","difficulty":"beginner","read_time":3,"summary":"How efficiently a company uses shareholder money to generate profit.","content":"ROE = Net Profit / Shareholders Equity x 100. A 20% ROE means the company generates Rs20 of profit for every Rs100 of shareholder capital annually.\n\nROE above 20% is excellent. Sustained high ROE over 10+ years is the hallmark of a genuine competitive moat.\n\nWarren Buffett requires ROE consistently above 20% WITHOUT using excessive debt. Marcellus requires 20%+ for 10 consecutive years. Rakesh Jhunjhunwala required 15%+.\n\nKey warning: High ROE through high debt is dangerous. Always check D/E ratio alongside ROE.","example_stock":"ASIANPAINT","watch_out":"ROE inflated by debt is misleading. ROCE is a better quality indicator as it accounts for all capital.","related":["roce","debt-equity"]},
+{"id":"roce","title":"Return on Capital Employed (ROCE)","category":"metrics","difficulty":"intermediate","read_time":3,"summary":"The purest measure of how well a business uses ALL its capital.","content":"ROCE = EBIT / Capital Employed. Accounts for ALL capital - both equity and debt. The cleanest measure of business quality.\n\nROCE above 20% consistently = hallmark of truly great businesses. Marcellus entire strategy built around companies with ROCE above 15% (CCP targets 25-40%+) for 10 consecutive years.\n\nCharlie Munger: Show me a business with 25% ROCE sustained over 20 years and I will show you a real durable moat.\n\nFor financial companies (banks, NBFCs) use ROE instead.","example_stock":"PIDILITIND","watch_out":"Capital-intensive businesses will naturally have lower ROCE. Always compare ROCE within the same sector.","related":["roe","operating-margins"]},
+{"id":"debt-equity","title":"Debt to Equity Ratio","category":"metrics","difficulty":"beginner","read_time":3,"summary":"How much debt a company has compared to shareholder funds.","content":"D/E of 0.5 = Rs50 debt for every Rs100 equity. D/E of 2.0 = Rs200 debt for every Rs100 equity.\n\nIndia biggest failures - IL&FS, DHFL, Reliance Communications, Jet Airways - all had extreme leverage.\n\nChandrakant Sampat made zero debt his single non-negotiable criterion. Marcellus requires near-zero debt. Buffett strongly prefers D/E below 0.5. Rakesh Jhunjhunwala required D/E below 0.5.","example_stock":"HINDUNILVR","watch_out":"Zero debt is not always optimal. The question is whether ROCE exceeds cost of borrowing.","related":["roe","interest-coverage","current-ratio"]},
+{"id":"operating-margins","title":"Operating Profit Margin (OPM)","category":"metrics","difficulty":"beginner","read_time":3,"summary":"What percentage of revenue becomes operating profit - the pricing power signal.","content":"OPM = Operating Profit / Revenue x 100. A 20% OPM means Rs20 of every Rs100 revenue is operating profit after all operating costs but before interest and taxes.\n\nHigh and stable OPM = pricing power. Nestle, Asian Paints, Pidilite consistently maintain 20%+ OPM because of brand strength.\n\nWarren Buffett requires OPM above 15%. Rakesh Jhunjhunwala required OPM above 15%. Charlie Munger requires OPM above 25%.","example_stock":"BRITANNIA","watch_out":"Compare margins within sectors only. Never compare margins across industries.","related":["roe","roce","revenue-growth"]},
+{"id":"pb-ratio","title":"Price to Book (P/B) Ratio","category":"metrics","difficulty":"intermediate","read_time":3,"summary":"What premium the market charges over the company net assets.","content":"Book value = what shareholders receive if company sold all assets and paid all debts today.\n\nP/B below 1 = market values company less than its net assets. Benjamin Graham looked for stocks below 1.5x book as his primary entry criterion.\n\nFor asset-heavy businesses (banks, manufacturing) P/B is very meaningful. For software companies, P/B is less relevant - their value is intellectual property, not balance sheet assets.","example_stock":"SBIN","watch_out":"Low P/B can mean assets are impaired. Always check asset quality before buying low P/B stocks.","related":["pe-ratio"]},
+{"id":"peg-ratio","title":"PEG Ratio - Growth at Reasonable Price","category":"metrics","difficulty":"intermediate","read_time":3,"summary":"P/E ratio adjusted for growth - the tool Peter Lynch used to beat the market.","content":"PEG = P/E Ratio divided by Earnings Growth Rate.\n\nPEG below 1.0 = you are paying less than the growth rate justifies. PEG above 2.0 = paying a significant premium for expected growth.\n\nExample: P/E of 30x with earnings growing 35% = PEG of 0.86 - excellent value. P/E of 50x with 15% growth = PEG of 3.3 - very expensive.\n\nRaamdeo Agrawal QGLP framework targets PEG below 1.5x. Motilal Oswal screens specifically for low PEG stocks.","example_stock":"BAJFINANCE","watch_out":"PEG relies on future growth estimates which can be wrong. Use trailing earnings growth, not analyst projections.","related":["pe-ratio","earnings-growth"]},
+{"id":"ev-ebitda","title":"EV/EBITDA - The Professional Valuation Metric","category":"metrics","difficulty":"advanced","read_time":4,"summary":"Enterprise value relative to operating earnings - capital-structure neutral valuation used by PE firms.","content":"EV = Market Cap + Total Debt - Cash. EBITDA = operating earnings before accounting adjustments.\n\nEV/EBITDA is capital-structure neutral - does not matter whether company is funded by debt or equity, making it ideal for comparing across companies.\n\nBelow 8x generally cheap, above 15x expensive. This is why M&A professionals and PE firms use it almost exclusively.","example_stock":"TATAMOTORS","watch_out":"EBITDA ignores capex requirements. For capital-intensive businesses use EV/FCF instead. Never use EV/EBITDA for banks.","related":["pe-ratio","free-cash-flow"]},
+{"id":"dividend-yield","title":"Dividend Yield","category":"metrics","difficulty":"beginner","read_time":2,"summary":"Annual cash returned to shareholders as a percentage of stock price.","content":"Dividend Yield = Annual Dividend per Share / Stock Price x 100.\n\nA Rs200 stock paying Rs10 annual dividend = 5% yield.\n\nBest dividend stocks grow their dividend over time. A company growing dividends 10% annually doubles your income stream every 7 years.","example_stock":"COALINDIA","watch_out":"Very high yield (above 6-7%) often signals investors expect a dividend cut. Always check if payout is covered by free cash flow.","related":["free-cash-flow"]},
+{"id":"promoter-holding","title":"Promoter Holding","category":"metrics","difficulty":"beginner","read_time":2,"summary":"How much of the company is owned by its founders - the skin-in-the-game indicator.","content":"High promoter holding (>50%) means founders personally lose money if the company fails.\n\nRakesh Jhunjhunwala required promoter holding above 50%. Vijay Kedia uses it as a key management quality indicator.\n\nPromoter pledge is equally important - if promoters pledged shares as collateral for loans, a stock price fall can trigger forced selling and create a death spiral.","example_stock":"TITAN","watch_out":"High promoter holding in a poorly governed company can mean minority shareholders have no protection.","related":["corporate-governance"]},
+{"id":"current-ratio","title":"Current Ratio","category":"metrics","difficulty":"intermediate","read_time":2,"summary":"Can the company pay its bills over the next 12 months?","content":"Current Ratio = Current Assets / Current Liabilities.\n\nAbove 2.0 = company has Rs2 for every Rs1 of near-term obligations. Benjamin Graham required current ratio above 2.0.\n\nBelow 1.0 = cannot pay current bills from current assets - serious warning sign.","example_stock":"HDFCBANK","watch_out":"High current ratio is not always good - could mean excess inventory not selling or receivables not being collected.","related":["debt-equity","interest-coverage"]},
+{"id":"interest-coverage","title":"Interest Coverage Ratio","category":"metrics","difficulty":"intermediate","read_time":2,"summary":"How easily can the company pay its interest obligations?","content":"Interest Coverage = EBIT / Interest Expense.\n\nBelow 1.5x = dangerous. Above 5x = excellent.\n\nDebt-free companies have infinite interest coverage - no risk of financial distress regardless of business cycles. This is why Chandrakant Sampat and Marcellus love zero-debt businesses.","example_stock":"HINDUNILVR","watch_out":"Interest coverage can deteriorate rapidly in cyclical downturns.","related":["debt-equity","current-ratio"]},
+{"id":"free-cash-flow","title":"Free Cash Flow (FCF)","category":"metrics","difficulty":"intermediate","read_time":3,"summary":"The actual cash a business generates after maintaining and growing its asset base.","content":"FCF = Operating Cash Flow - Capital Expenditure.\n\nA company can show accounting profits while burning cash. FCF cuts through accounting and shows real cash generation.\n\nMarcellus CCP strategy specifically focuses on companies with consistent FCF generation. FCF yield (FCF / Market Cap) is an excellent valuation metric - 5%+ FCF yield is generally attractive.","example_stock":"PIDILITIND","watch_out":"Negative FCF is not always bad - fast-growing companies invest heavily in future growth. Context matters.","related":["roce","ev-ebitda"]},
+{"id":"revenue-growth","title":"Revenue Growth","category":"metrics","difficulty":"beginner","read_time":2,"summary":"How fast the company is growing its sales year over year.","content":"Revenue growth above 15% = high growth. 10-15% = good. Below 5% = maturing or struggling.\n\nRevenue growth MUST be accompanied by profitable margins. A company growing revenue at 30% but losing money on every sale is destroying value.\n\nMarcellus requires 10% CAGR for 10 consecutive years. Raamdeo Agrawal requires 15-20% earnings growth.","example_stock":"TCS","watch_out":"Discounts and price cuts can temporarily inflate revenue growth while destroying profitability.","related":["earnings-growth","operating-margins"]},
+{"id":"earnings-growth","title":"Earnings Growth","category":"metrics","difficulty":"beginner","read_time":2,"summary":"How fast profits are growing - the primary engine of stock price appreciation.","content":"Earnings growth is the primary driver of stock price appreciation. A company growing profits at 20% annually will roughly double its stock price every 4 years.\n\nPeter Lynch key insight: in the long run, stock price follows earnings. Find a company that grows earnings at 20% for 10 years - the stock will follow.\n\nEarnings above 20% = high growth. 12-20% = good. Below 8% = slow growth.","example_stock":"BAJFINANCE","watch_out":"One-time items can inflate or deflate earnings. Always check if growth is sustainable.","related":["revenue-growth","pe-ratio","peg-ratio"]}
+],
+"strategies":[
+{"id":"value-investing","title":"Value Investing - Buy What Others Ignore","category":"strategies","difficulty":"beginner","read_time":5,"summary":"The art of buying good businesses at prices below what they are actually worth.","content":"Invented by Benjamin Graham and perfected by Warren Buffett. Core idea: stocks represent ownership in real businesses, and like any asset, businesses can be bought cheaply or expensively.\n\nThe market is not always rational. Fear causes prices to drop below intrinsic value. Greed causes prices to rise above it. Value investors profit from this irrationality.\n\nIn India, best value opportunities come during: market crashes (2008, 2020), sector downturns (IT in 2001, pharma in 2016-17), company-specific bad news that is temporary, PSU reforms.\n\nKey principles: Always buy with margin of safety. Think like a business owner not a trader. Be patient. Distinguish temporary problems from permanent decline.","related":["pe-ratio","pb-ratio"]},
+{"id":"quality-investing","title":"Quality Investing - Great Businesses at Fair Prices","category":"strategies","difficulty":"intermediate","read_time":5,"summary":"Finding businesses with durable competitive advantages and holding them for decades.","content":"Quality investing evolved from value investing. While Graham looked for cheap businesses, Buffett (influenced by Charlie Munger) evolved to paying fair prices for genuinely great businesses.\n\nThe insight: a great business at a fair price is better than a mediocre business at a cheap price. Over 10+ years, business quality dominates everything else.\n\nWhat makes a quality business in India: Consistent high ROCE (above 20%) for 10+ years. Pricing power. Low debt. Strong management with integrity. Large addressable market.\n\nMarcellus Consistent Compounders Portfolio is built entirely on quality principles - their universe of stocks passing all filters is fewer than 25 companies in all of India.","related":["roce","moat"]},
+{"id":"growth-investing","title":"Growth Investing - Riding the Earnings Tide","category":"strategies","difficulty":"intermediate","read_time":4,"summary":"Investing in companies growing faster than the market and holding through the growth phase.","content":"Growth investors focus on businesses growing revenue and earnings significantly faster than the market.\n\nPeter Lynch key insight: find a company that grows earnings at 20% for 10 years and it will be a 6x return regardless of price - as long as you do not massively overpay.\n\nIndia biggest growth stories: Bajaj Finance (200x in 10 years), HDFC Bank (100x in 20 years), Asian Paints (50x in 15 years).\n\nThe risk: growth can disappoint. A company priced for 30% growth at 60x PE that delivers only 15% growth will see the stock fall 40-60%.","related":["peg-ratio","earnings-growth"]},
+{"id":"moat","title":"Competitive Moats - What Protects a Business","category":"strategies","difficulty":"intermediate","read_time":5,"summary":"Why some businesses earn high returns indefinitely while others cannot.","content":"Warren Buffett popularized the economic moat concept.\n\n5 types of moats:\n1. Brand moat: Fevicol (Pidilite) - no contractor risks using cheaper alternative.\n2. Switching costs: Tally accounting software - years of data make migration prohibitively expensive.\n3. Network effects: NSE - more traders attract more liquidity.\n4. Cost advantage: DMart - EDLP model, owned stores, no frills.\n5. Regulatory moat: CAMS - processes 70% of mutual fund transactions.\n\nBusinesses with strong moats sustain high ROCEs for decades.","related":["quality-investing","roce"]},
+{"id":"contrarian-investing","title":"Contrarian Investing - Opportunity in Hatred","category":"strategies","difficulty":"intermediate","read_time":4,"summary":"Finding great opportunities in sectors and stocks that everyone else is avoiding.","content":"Buy what is universally hated, sell what is universally loved.\n\nPrashant Jain (HDFC MF) built his career on contrarian calls: bought PSU banks in 2012-13 when everyone hated them, bought infrastructure in 2014 when out of favour.\n\nDolly Khanna specialises in buying cyclical businesses at the absolute bottom of their cycle.\n\nChallenge: being too early is the same as being wrong. Requires deep conviction and ability to hold for 3-5 years while being publicly wrong.","related":["value-investing"]},
+{"id":"smallcap-investing","title":"Smallcap Investing - Where the Real Multibaggers Are","category":"strategies","difficulty":"advanced","read_time":5,"summary":"Why small cap stocks deliver the highest returns - and the risks that come with it.","content":"Small caps (market cap below Rs5,000 Cr) deliver the highest long-term returns because institutional investors cannot buy them in meaningful size. This institutional exclusion creates systematic mispricing.\n\nVijay Kedia bought Atul Auto at Rs5 when it was a Rs50 crore company. Porinju Veliyath built his fortune finding beaten-down quality small caps.\n\nThe risks: Low liquidity. Less information. Higher volatility (50-60% drawdowns normal). Higher failure rate.\n\nRule: only invest in small caps with strong promoters, clean accounting, and a clear business model you can understand yourself.","related":["vijay-kedia-smile"]},
+{"id":"dividend-investing","title":"Dividend Investing - Getting Paid to Wait","category":"strategies","difficulty":"beginner","read_time":3,"summary":"Building wealth through companies that share profits consistently with shareholders.","content":"Focus on companies that regularly pay a portion of profits to shareholders as cash.\n\nIn India, consistent dividend payers include Coal India, ITC, Infosys, Power Grid, NTPC.\n\nThe magic of dividend growth: if a company yields 3% today and grows dividends at 10% annually, after 10 years your yield on original cost is 7.8%. After 20 years, 20%.","related":["dividend-yield","free-cash-flow"]}
+],
+"beginners":[
+{"id":"what-is-a-stock","title":"What is a Stock?","category":"beginners","difficulty":"beginner","read_time":3,"summary":"Owning a stock means owning a small piece of a real business.","content":"When you buy one share of Reliance Industries, you become a part-owner of one of India largest businesses. A stock is not just a price on a screen - it represents real ownership in a real business with real assets, employees, customers, and profits.\n\nCompanies issue shares to raise money from the public. Shareholders own a proportional part of the business and share in profits through dividends and benefit from business growth through rising share prices.\n\nNSE and BSE are marketplaces where shares are bought and sold every trading day, 9:15 AM to 3:30 PM IST.","related":["market-cap","nifty-sensex-explained"]},
+{"id":"market-cap","title":"What is Market Capitalisation?","category":"beginners","difficulty":"beginner","read_time":2,"summary":"The total value the market places on a company at any given time.","content":"Market capitalisation = Share Price x Total Number of Shares.\n\nIn India, companies are classified by market cap:\nLarge Cap: Top 100 companies (above Rs20,000 Cr) - stable, well-followed\nMid Cap: Companies ranked 101-250 (Rs5,000-20,000 Cr) - good growth with moderate risk\nSmall Cap: Companies ranked below 250 (below Rs5,000 Cr) - highest growth potential, highest risk","related":["what-is-a-stock","smallcap-investing"]},
+{"id":"how-to-read-annual-report","title":"How to Read an Annual Report in 10 Minutes","category":"beginners","difficulty":"intermediate","read_time":5,"summary":"The 5 things you must check in every annual report before investing.","content":"1. MD Letter to Shareholders (3 min): Is management honest? Are they acknowledging problems or only celebrating wins?\n\n2. P and L Statement (2 min): Is revenue growing? Are margins expanding or contracting?\n\n3. Balance Sheet (2 min): Is debt increasing? Is cash building? Are receivables growing faster than revenue?\n\n4. Cash Flow Statement (2 min): Most honest statement - cannot be easily manipulated. Is the company actually collecting cash?\n\n5. Related Party Transactions (1 min): Large transactions with promoter-owned companies? This is how money gets siphoned out quietly.\n\nBonus: Read auditor notes - any qualifications are serious warning signs.","related":["debt-equity","free-cash-flow","promoter-holding"]},
+{"id":"nifty-sensex-explained","title":"What are Nifty and Sensex?","category":"beginners","difficulty":"beginner","read_time":3,"summary":"India two main stock market indices - and what they actually measure.","content":"The Sensex is the BSE index of 30 large companies. The Nifty 50 is the NSE index of 50 large companies. Think of them as the average temperature of the Indian stock market.\n\nThe Nifty P/E ratio shows whether the entire market is cheap or expensive. Historical average: 20-22x. Below 15x = historically very cheap. Above 28x = historically expensive.\n\nIf your portfolio significantly underperforms the Nifty over 5+ years, you would have been better off in a simple Nifty index fund.","related":["pe-ratio","value-investing"]},
+{"id":"understanding-ipo","title":"IPOs - Should You Apply?","category":"beginners","difficulty":"intermediate","read_time":4,"summary":"What an IPO is and how to think rationally about whether to invest in one.","content":"An IPO is when a private company sells shares to the public for the first time. The company and its investment bankers price the IPO to maximise proceeds - they are NOT leaving money on the table for retail investors.\n\nReality of IPOs: Most underperform the market over 3-5 years. The exceptions get enormous media coverage. The failures are quickly forgotten.\n\nWhen to consider: You have deeply researched the business and believe in its 5-10 year story. The valuation is reasonable compared to listed peers. You are buying to hold for years, not for listing day gains.","related":["valuation","market-cap"]},
+{"id":"sip-vs-lumpsum","title":"SIP vs Lumpsum - What the Data Says","category":"beginners","difficulty":"beginner","read_time":3,"summary":"The evidence-based answer to India biggest investing debate.","content":"SIP means investing a fixed amount every month. Lumpsum means investing a large amount at once.\n\nData shows: In bull markets, lumpsum outperforms SIP. In volatile markets, SIP outperforms lumpsum. Over 10+ years, returns are usually similar.\n\nReal answer: SIP wins for most people not because of mathematical superiority but because of behavioural superiority. Most people cannot time the market. SIP forces discipline.\n\nIf you receive a large sum: invest 50% immediately and the rest via SIP over 12 months.","related":["compounding"]}
+],
+"investors":[
+{"id":"rj-deep-dive","title":"Rakesh Jhunjhunwala - The Exact Criteria","category":"investors","difficulty":"intermediate","read_time":6,"summary":"The precise quantitative and qualitative criteria India greatest investor used to select stocks.","content":"QUANTITATIVE FILTERS (all must be met):\nMarket Cap: Above Rs5,000 Cr\nRevenue Growth: Above 10% CAGR for 5 years\nROCE: Above 15%\nROE: Above 15%\nDebt/Equity: Below 0.5\nOPM: Above 15%\nPromoter Holding: Above 50%\nP/E: Below industry/sector average at time of purchase\n\nQUALITATIVE FILTERS:\nBusiness with entry barriers - a durable competitive advantage\nLarge addressable market with a 10+ year runway\nStrong cash reserves on balance sheet\nManagement he respected and trusted personally\nIndia-specific growth story riding secular megatrends\n\nHIS PROCESS:\n1. Start with a macro thesis about India growth\n2. Identify sectors that benefit most from that growth\n3. Find the best-run company in that sector\n4. Verify financials meet minimum criteria\n5. Buy and hold for 5-20 years\n\nKEY PRINCIPLE: He held Titan for 20+ years, Crisil for 15 years. He did not sell during market crashes - he bought more.\n\nON SELLING: He only sold when (1) he needed capital for a better opportunity or (2) when the stock market PE became so irrational that valuation was unsustainable.","related":["roe","roce","promoter-holding","value-investing"]},
+{"id":"marcellus-deep-dive","title":"Marcellus - The Forensic Accounting Approach","category":"investors","difficulty":"advanced","read_time":7,"summary":"Saurabh Mukherjea precise 12-ratio forensic screen and exact CCP criteria.","content":"STAGE 1 - QUANTITATIVE SCREEN:\nMarket Cap: Above Rs100 Cr\nROCE: Above 15% for 10 consecutive years (CCP typically finds 25-40%+ ROCE stocks)\nRevenue Growth: Above 10% CAGR for 10 consecutive years\nDebt: Near-zero (D/E typically below 0.2)\nPromoter Pledge: Zero or near-zero\n\nSTAGE 2 - FORENSIC ACCOUNTING (12 ratios from Schilit Financial Shenanigans):\nCash flow from operations vs net profit ratio\nRevenue recognition quality\nDays of inventory change\nDays of receivables change\nRelated party transaction analysis\nContingent liabilities assessment\nAudit quality and auditor tenure\nManagement compensation relative to profit\n\nPHILOSOPHY:\nGreat businesses destroy competition slowly and surely, without making noise. They are boring - paint, adhesives, biscuits, software - but they do it better than anyone else, consistently, for decades.\n\nPORTFOLIO CONSTRUCTION:\n12-15 stocks maximum. Equal weight. Annual April rebalance. Very low turnover.\n\nWHAT THEY AVOID: Any leverage, aggressive revenue recognition, large related-party transactions, promoter pledge, acquisitive companies.","related":["roce","free-cash-flow","promoter-holding"]},
+{"id":"buffett-deep-dive","title":"Warren Buffett - The Complete Criteria","category":"investors","difficulty":"intermediate","read_time":6,"summary":"Every criterion Buffett uses to evaluate an investment, in his own words.","content":"BUSINESS QUALITY CRITERIA:\nROE consistently above 20% (not through leverage)\nOperating margins above 15% (pricing power signal)\nDebt/Equity below 0.5 (preferably near zero)\nBusiness he can understand in 5 minutes\nConsistent earnings - not cyclical, not lumpy\nPricing power - can raise prices without losing customers\n\nMANAGEMENT CRITERIA:\nHonest and candid management\nManagement treats shareholder capital like their own\nLong tenure - management stability\nCEO incentives aligned with shareholders\n\nVALUATION CRITERIA:\nIntrinsic value = Present value of all future cash flows\nPrefers fair price not cheap price for great business\nWould not pay more than 25-35x earnings for even the best business\nMargin of safety - always buy below intrinsic value\n\nHIS CHECKLIST:\n1. Is this a business I understand?\n2. Does it have durable competitive advantages?\n3. Is management honest and capable?\n4. Is the price reasonable relative to intrinsic value?\n5. Would I be comfortable owning this for 10+ years?","related":["roe","debt-equity","operating-margins","quality-investing"]},
+{"id":"vijay-kedia-smile","title":"Vijay Kedia SMILE Framework - Complete Guide","category":"investors","difficulty":"intermediate","read_time":5,"summary":"How to use Kedia legendary SMILE framework to find small cap multibaggers.","content":"S - SMALL IN SIZE\nMarket cap typically under Rs1,000-5,000 Cr. Small enough to be ignored by institutional investors. Kedia says: Small companies have more room to grow.\n\nM - MEDIUM IN EXPERIENCE\nManagement with 10-15 years running this specific business. Survived at least one major economic downturn. Knows the industry deeply.\n\nL - LARGE IN ASPIRATION\nManagement must think big - fire in the belly. Actively expanding. Not satisfied with current size.\n\nE - EXTRA-LARGE MARKET POTENTIAL\nThe industry TAM must be enormous. Company currently has small market share - lots of room to grow.\n\nHOW KEDIA FINDS THESE:\nReads extensively. Talks to industry participants. Visits company facilities. Meets management personally. Holds for 10-20 years once convinced.\n\nBIGGEST WINS:\nAtul Auto: Bought at Rs5, sold at Rs800 (160x in 15 years)\nCera Sanitaryware: Rs30 to Rs4,800 (160x in 16 years)","related":["smallcap-investing","promoter-holding"]}
+]
 }
 
+def get_all_content(category=None):
+    all_items = []
+    for cat, items in EDUCATION.items():
+        for item in items:
+            if not category or item["category"] == category:
+                all_items.append({k:v for k,v in item.items() if k != "content"})
+    return all_items
 
-# ─── Cache functions ──────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# CACHE
+# ═══════════════════════════════════════════════════════════════════════════════
 def save_cache():
     try:
-        with _cache_lock:
-            data = {"cache_time": _cache_time.isoformat() if _cache_time else None, "stocks": _cache}
+        with _cache_lock: data = {"cache_time": _cache_time.isoformat() if _cache_time else None, "stocks": _cache}
         with open(CACHE_FILE, "w") as f: json.dump(data, f)
         with open(SECTOR_CACHE_FILE, "w") as f: json.dump(_sector_averages, f)
-        print(f"Saved {len(_cache)} stocks to disk")
-    except Exception as e: print(f"Save failed: {e}")
-
+        print(f"Saved {len(_cache)} stocks, {len(_sector_averages)} sectors")
+    except Exception as e: print(f"Save error: {e}")
 
 def load_cache():
     global _cache, _cache_time, _sector_averages
     try:
         if not os.path.exists(CACHE_FILE): return False
-        with open(CACHE_FILE, "r") as f: data = json.load(f)
+        with open(CACHE_FILE) as f: data = json.load(f)
         stocks = data.get("stocks", {}); ct = data.get("cache_time")
         if not stocks: return False
         with _cache_lock:
             _cache = stocks
             _cache_time = datetime.fromisoformat(ct) if ct else datetime.now()
         if os.path.exists(SECTOR_CACHE_FILE):
-            with open(SECTOR_CACHE_FILE, "r") as f: _sector_averages = json.load(f)
-        age_h = (datetime.now() - _cache_time).total_seconds() / 3600
-        print(f"Loaded cache: {len(stocks)} stocks, {age_h:.1f}h old")
+            with open(SECTOR_CACHE_FILE) as f: _sector_averages = json.load(f)
+        print(f"Loaded {len(stocks)} stocks, {len(_sector_averages)} sector avgs")
         return True
-    except Exception as e: print(f"Load failed: {e}"); return False
-
+    except Exception as e: print(f"Load error: {e}"); return False
 
 def refresh_cache():
     global _cache, _cache_time, _is_refreshing, _refresh_progress, _sector_averages
@@ -2195,182 +1180,112 @@ def refresh_cache():
     _is_refreshing = True
     universe = NIFTY_500
     _refresh_progress = {"done": 0, "total": len(universe)}
-    print(f"\nCache refresh — {len(universe)} stocks via yfinance\n")
-
+    print(f"Starting cache refresh: {len(universe)} stocks")
     new_cache = {}
+    with _cache_lock: avgs = dict(_sector_averages)
     for i, symbol in enumerate(universe):
         try:
             print(f"  [{i+1}/{len(universe)}] {symbol}...", end=" ", flush=True)
-            raw = fetch_stock_data(symbol)
+            raw = fetch_screener(symbol)
             if raw and raw.get("current_price"):
-                entry = build_entry(symbol, raw, _sector_averages)
+                entry = build_entry(symbol, raw, avgs)
                 new_cache[symbol] = entry
-                print(f"✓ score={entry['scoring']['composite']:.0f} [{raw.get('data_source','?')}]")
-            else:
-                print("✗ no data")
+                print(f"ok {entry['scoring']['composite']:.0f}")
+            else: print("no data")
             _refresh_progress["done"] = i + 1
-
-            if (i + 1) % 30 == 0 and new_cache:
-                with _cache_lock:
-                    _cache.update(new_cache)
-                    _cache_time = datetime.now()
-                avgs = compute_sector_averages(new_cache)
-                with _cache_lock: _sector_averages = avgs
+            if (i + 1) % 25 == 0:
+                with _cache_lock: _cache.update(new_cache)
+                avgs = compute_sector_averages({**_cache, **new_cache})
+                with _cache_lock: _sector_averages = avgs; _cache_time = datetime.now()
                 save_cache()
-
-            time.sleep(0.5)  # yfinance is faster than scraping
+            time.sleep(0.8)
         except Exception as e:
-            print(f"✗ {e}"); _refresh_progress["done"] = i + 1; time.sleep(1)
-
-    # Final sector averages
-    sector_avgs = compute_sector_averages(new_cache)
-    # Recompute all entries with final sector averages
-    for sym in new_cache:
-        new_cache[sym]["sector_comparison"] = get_sector_comparison(new_cache[sym], sector_avgs)
-        new_cache[sym]["scoring"] = score_stock(new_cache[sym], sector_avgs)
-        new_cache[sym]["conviction"] = conviction_tier(new_cache[sym]["scoring"]["composite"])
-        new_cache[sym]["matching_profiles"] = get_matching_profiles(new_cache[sym], sector_avgs)
-
+            print(f"err {e}"); _refresh_progress["done"] = i + 1; time.sleep(1)
+    final_avgs = compute_sector_averages(new_cache)
+    for sym in list(new_cache.keys()):
+        try:
+            new_cache[sym]["sector_comparison"] = get_sector_comp(new_cache[sym], final_avgs)
+            new_cache[sym]["matching_profiles"] = get_matching_profiles(new_cache[sym], final_avgs)
+            new_cache[sym]["scoring"] = score_stock(new_cache[sym], final_avgs)
+            new_cache[sym]["conviction"] = conviction(new_cache[sym]["scoring"]["composite"])
+        except: pass
     with _cache_lock:
-        _cache = new_cache
-        _cache_time = datetime.now()
-        _sector_averages = sector_avgs
-
+        _cache = new_cache; _cache_time = datetime.now(); _sector_averages = final_avgs
     save_cache()
-    print(f"\nCache complete: {len(new_cache)} stocks\n")
+    print(f"Refresh complete: {len(new_cache)} stocks, {len(final_avgs)} sectors")
     _is_refreshing = False
-
 
 @app.on_event("startup")
 async def startup():
     global _sector_averages
     loaded = load_cache()
     if loaded:
-        age_h = (datetime.now() - _cache_time).total_seconds() / 3600
-        # Apply hardcoded sectors to cached stocks first
-        updated = 0
         with _cache_lock:
             for sym, stock in _cache.items():
-                if stock.get("sector", "Unknown") == "Unknown" and sym in NSE_SECTOR_MAP:
-                    stock["sector"] = NSE_SECTOR_MAP[sym]
-                    updated += 1
-        if updated: print(f"Applied hardcoded sectors to {updated} stocks")
-        # Always recompute sector averages
-        with _cache_lock:
-            avgs = compute_sector_averages(_cache)
-        with _cache_lock:
-            _sector_averages = avgs
-        print(f"Computed sector averages: {len(_sector_averages)} sectors")
-        # Rebuild if stale or missing merged data
-        sample = list(_cache.values())[:5] if _cache else []
-        needs_rebuild = age_h > 4 or any(s.get("net_margins") is None and s.get("current_ratio") is None for s in sample[:10])
-        if needs_rebuild:
-            print(f"Cache rebuild needed (age={age_h:.1f}h)")
+                if stock.get("sector", "Unknown") in ("Unknown", "", None):
+                    stock["sector"] = sector_for(sym, "Unknown")
+        avgs = compute_sector_averages(_cache)
+        with _cache_lock: _sector_averages = avgs
+        print(f"Startup: {len(_cache)} stocks, {len(_sector_averages)} sector avgs")
+        age_h = (datetime.now() - _cache_time).total_seconds() / 3600
+        sample = list(_cache.values())[:10]
+        missing = sum(1 for s in sample if s.get("operating_margins") is None and s.get("net_margins") is None)
+        if age_h > 6 or missing >= 5:
+            print(f"Triggering rebuild (age={age_h:.1f}h, {missing}/10 missing margins)")
             threading.Thread(target=refresh_cache, daemon=True).start()
-        else:
-            print(f"Cache fresh ({age_h:.1f}h, {len(_sector_averages)} sectors indexed)")
     else:
         threading.Thread(target=refresh_cache, daemon=True).start()
 
-
-# ─── Routes ───────────────────────────────────────────────────────────────────
 @app.get("/")
 def root():
-    return {
-        "app": "stocks.ai", "version": "12.0.0",
-        "cached_stocks": len(_cache), "refreshing": _is_refreshing,
-        "progress": f"{_refresh_progress['done']}/{_refresh_progress['total']}",
-        "cache_age": str(datetime.now() - _cache_time).split(".")[0] if _cache_time else "warming",
-        "profiles": len(INVESTOR_PROFILES),
-        "sectors_indexed": len(_sector_averages),
-    }
+    return {"app": "stocks.ai", "version": "13.0.0", "cached_stocks": len(_cache),
+            "refreshing": _is_refreshing, "progress": f"{_refresh_progress['done']}/{_refresh_progress['total']}",
+            "sectors_indexed": len(_sector_averages), "profiles": len(INVESTOR_PROFILES),
+            "cache_age": str(datetime.now() - _cache_time).split(".")[0] if _cache_time else "warming"}
 
 @app.get("/api/cache/status")
 def cache_status():
-    return {
-        "ready": len(_cache) > 0, "count": len(_cache),
-        "refreshing": _is_refreshing, "progress": _refresh_progress,
-        "last_updated": _cache_time.isoformat() if _cache_time else None,
-    }
+    return {"ready": len(_cache) > 0, "count": len(_cache), "refreshing": _is_refreshing,
+            "progress": _refresh_progress, "sectors": len(_sector_averages)}
 
 @app.get("/api/cache/refresh")
 def trigger_refresh(bg: BackgroundTasks):
     if _is_refreshing: return {"message": "Already refreshing"}
-    bg.add_task(refresh_cache)
-    return {"message": "Refresh started"}
+    bg.add_task(refresh_cache); return {"message": "Refresh started"}
 
 @app.get("/api/profiles")
 def get_profiles():
     return {"profiles": INVESTOR_PROFILES, "count": len(INVESTOR_PROFILES)}
 
-@app.get("/api/education")
-def get_education(category: Optional[str] = None):
-    all_content = []
-    for cat, items in EDUCATION_CONTENT.items():
-        for item in items:
-            if not category or item["category"] == category:
-                all_content.append({k: v for k, v in item.items() if k != "content"})
-    return {"content": all_content, "categories": list(EDUCATION_CONTENT.keys())}
-
-@app.get("/api/education/{content_id}")
-def get_education_item(content_id: str):
-    for cat, items in EDUCATION_CONTENT.items():
-        for item in items:
-            if item["id"] == content_id:
-                return item
-    raise HTTPException(404, f"Content '{content_id}' not found")
-
-@app.get("/api/sector-averages")
-def sector_averages():
-    global _sector_averages
-    # If empty, recompute on the fly
-    if not _sector_averages and _cache:
-        with _cache_lock:
-            avgs = compute_sector_averages(_cache)
-        with _cache_lock:
-            _sector_averages = avgs
-        print(f"On-demand sector avg computation: {len(_sector_averages)} sectors")
-    return {"sectors": _sector_averages, "count": len(_sector_averages)}
-
 @app.get("/api/symbols")
 def get_symbols():
-    """Fast endpoint returning all cached symbols for autocomplete."""
     with _cache_lock:
-        symbols = [
-            {
-                "symbol": v["symbol"],
-                "name": v["company_name"],
-                "sector": v.get("sector", "Unknown"),
-            }
-            for v in _cache.values()
-            if v.get("symbol")
-        ]
-    # Also include the full universe even if not cached yet
-    universe_symbols = [{"symbol": s, "name": s, "sector": ""} for s in NIFTY_500 if s not in {x["symbol"] for x in symbols}]
-    return {"symbols": symbols + universe_symbols, "count": len(symbols) + len(universe_symbols)}
+        cached = [{"symbol": v["symbol"], "name": v["company_name"], "sector": v.get("sector", "Unknown")} for v in _cache.values() if v.get("symbol")]
+    cached_syms = {s["symbol"] for s in cached}
+    extra = [{"symbol": s, "name": s, "sector": NSE_SECTOR_MAP.get(s, "")} for s in NIFTY_500 if s not in cached_syms]
+    return {"symbols": cached + extra, "count": len(cached) + len(extra)}
+
+@app.get("/api/sector-averages")
+def get_sector_avgs():
+    global _sector_averages
+    if not _sector_averages and _cache:
+        avgs = compute_sector_averages(_cache)
+        with _cache_lock: _sector_averages = avgs
+    return {"sectors": _sector_averages, "count": len(_sector_averages)}
 
 @app.get("/api/stock/{symbol}")
 def get_stock(symbol: str):
     symbol = symbol.upper().strip()
-    with _cache_lock:
-        cached = _cache.get(symbol)
-    with _cache_lock:
-        avgs = dict(_sector_averages)
-    
+    with _cache_lock: cached = _cache.get(symbol)
+    with _cache_lock: avgs = dict(_sector_averages)
     if cached:
-        # Always recompute sector_comparison with latest sector avgs
-        sector = cached.get("sector", "Unknown")
-        if sector == "Unknown" and symbol in NSE_SECTOR_MAP:
-            sector = NSE_SECTOR_MAP[symbol]
-            cached = dict(cached)
-            cached["sector"] = sector
-        sc = get_sector_comparison(cached, avgs)
-        if sc:  # Only update if we got data
-            cached = dict(cached)
-            cached["sector_comparison"] = sc
+        if cached.get("sector", "Unknown") in ("Unknown", "", None):
+            cached = dict(cached); cached["sector"] = sector_for(symbol, "Unknown")
+        sc = get_sector_comp(cached, avgs)
+        if sc or not cached.get("sector_comparison"):
+            cached = dict(cached); cached["sector_comparison"] = sc
         return cached
-    
-    raw = fetch_stock_data(symbol)
+    raw = fetch_screener(symbol)
     if not raw or not raw.get("current_price"):
         raise HTTPException(404, f"Could not find {symbol}")
     entry = build_entry(symbol, raw, avgs)
@@ -2378,239 +1293,201 @@ def get_stock(symbol: str):
     return entry
 
 @app.get("/api/screen")
-def screen(
-    min_score: float = Query(40),
-    sector: Optional[str] = Query(None),
-    conviction: Optional[str] = Query(None),
-    profile: Optional[str] = Query(None),
-    limit: int = Query(30, le=100),
-    min_market_cap: Optional[float] = Query(None),
-    max_pe: Optional[float] = Query(None),
-    min_roe: Optional[float] = Query(None),
-):
+def screen(min_score: float = Query(40), sector: str = Query(None),
+           conviction_f: str = Query(None, alias="conviction"),
+           profile: str = Query(None), limit: int = Query(30, le=100),
+           min_market_cap: float = Query(None), max_pe: float = Query(None),
+           min_roe: float = Query(None)):
     with _cache_lock: stocks = list(_cache.values())
     if not stocks:
         done = _refresh_progress.get("done", 0); total = _refresh_progress.get("total", 0)
         return {"count": 0, "stocks": [], "warming": True,
-                "message": f"Loading... {done}/{total} done. Try again shortly."}
+                "message": f"Loading data... {done}/{total} stocks processed. Try again in a moment."}
+    with _cache_lock: avgs = dict(_sector_averages)
     results = []
     for s in stocks:
         if s["scoring"]["composite"] < min_score: continue
-        if conviction and conviction.lower() not in s["conviction"].lower(): continue
-        if sector and sector.lower() not in (s.get("sector") or "").lower(): continue
+        if conviction_f and conviction_f.lower() not in s["conviction"].lower(): continue
+        if sector and sector.lower() not in (s.get("sector", "")).lower(): continue
         if min_market_cap and (s.get("market_cap") or 0) < min_market_cap * 1e7: continue
         if max_pe and s.get("pe_ratio") and s["pe_ratio"] > max_pe: continue
         if min_roe and s.get("roe") and s["roe"] * 100 < min_roe: continue
         if profile:
-            with _cache_lock: avgs = dict(_sector_averages)
             ps = score_profile(s, profile, avgs)
-            if ps["score"] < 35: continue
+            if ps["score"] < 30: continue
             s = dict(s); s["profile_score"] = ps["score"]; s["profile_reasons"] = ps["reasons"]
         results.append(s)
     results.sort(key=lambda x: x.get("profile_score", x["scoring"]["composite"]), reverse=True)
-    return {
-        "count": len(results), "stocks": results[:limit],
-        "total_cached": len(stocks),
-        "cache_age": str(datetime.now() - _cache_time).split(".")[0] if _cache_time else "unknown",
-    }
+    return {"count": len(results), "stocks": results[:limit], "total_cached": len(stocks)}
 
 @app.get("/api/watchlist")
 def watchlist(symbols: str = Query(...)):
-    symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()][:20]
-    results, missing = [], []
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:25]
+    results = []; missing = []
     with _cache_lock: cached = dict(_cache)
-    for sym in symbol_list:
-        if sym in cached: results.append(cached[sym])
-        else: missing.append(sym)
     with _cache_lock: avgs = dict(_sector_averages)
+    for sym in syms:
+        if sym in cached:
+            s = dict(cached[sym]); s["sector_comparison"] = get_sector_comp(s, avgs); results.append(s)
+        else: missing.append(sym)
     for sym in missing:
         try:
-            raw = fetch_stock_data(sym)
+            raw = fetch_screener(sym)
             if raw and raw.get("current_price"):
                 entry = build_entry(sym, raw, avgs)
                 with _cache_lock: _cache[sym] = entry
                 results.append(entry)
-            time.sleep(0.3)
-        except Exception as e: print(f"Error {sym}: {e}")
+            time.sleep(0.5)
+        except: pass
     results.sort(key=lambda x: x["scoring"]["composite"], reverse=True)
     return {"count": len(results), "stocks": results}
 
 @app.get("/api/market/pulse")
 def market_pulse():
-    nifty_pe = fetch_nifty_pe()
-    market = get_market_valuation(nifty_pe)
-    with _cache_lock:
-        stocks = list(_cache.values())
+    npe = fetch_nifty_pe(); mv = get_market_valuation(npe)
+    with _cache_lock: stocks = list(_cache.values())
     if not stocks:
-        return {"nifty_pe": nifty_pe, "market": market, "strong_buys": [], "near_lows": [], "top_sectors": [], "total_indexed": 0}
-    strong_buys = sorted(
-        [s for s in stocks if s["conviction"] in ("Strong Buy", "Buy")],
-        key=lambda x: x["scoring"]["composite"], reverse=True
-    )[:6]
+        return {"nifty_pe": npe, "market": mv, "strong_buys": [], "near_lows": [], "top_sectors": [], "total_indexed": 0}
+    top_stocks = sorted([s for s in stocks if s["scoring"]["composite"] >= 55],
+                        key=lambda x: x["scoring"]["composite"], reverse=True)[:8]
     near_lows = []
     for s in stocks:
-        price = s.get("current_price"); low = s.get("52w_low"); high = s.get("52w_high")
-        if price and low and high and high > low:
-            pct_from_low = ((price - low) / (high - low)) * 100
-            if pct_from_low < 25:
-                near_lows.append({**s, "pct_from_low": round(pct_from_low, 1)})
-    near_lows = sorted(near_lows, key=lambda x: x["scoring"]["composite"], reverse=True)[:5]
-    sector_counts = {}
+        p = s.get("current_price"); lo = s.get("52w_low"); hi = s.get("52w_high")
+        if p and lo and hi and hi > lo:
+            pfl = ((p - lo) / (hi - lo)) * 100
+            if pfl < 25: near_lows.append({**s, "pct_from_low": round(pfl, 1)})
+    near_lows = sorted(near_lows, key=lambda x: x["scoring"]["composite"], reverse=True)[:6]
+    sc = {}
     for s in stocks:
         sec = s.get("sector", "Unknown")
-        if sec != "Unknown": sector_counts[sec] = sector_counts.get(sec, 0) + 1
-    top_sectors = sorted(sector_counts.items(), key=lambda x: x[1], reverse=True)[:6]
+        if sec != "Unknown": sc[sec] = sc.get(sec, 0) + 1
+    top_secs = sorted(sc.items(), key=lambda x: x[1], reverse=True)[:6]
     return {
-        "nifty_pe": nifty_pe,
-        "market": market,
+        "nifty_pe": npe, "market": mv,
         "strong_buys": [{"symbol": s["symbol"], "company_name": s["company_name"],
-                         "score": s["scoring"]["composite"], "sector": s.get("sector"), "conviction": s["conviction"]} for s in strong_buys],
+                          "score": s["scoring"]["composite"], "sector": s.get("sector"),
+                          "conviction": s["conviction"]} for s in top_stocks],
         "near_lows": [{"symbol": s["symbol"], "company_name": s["company_name"],
-                       "pct_from_low": s["pct_from_low"], "score": s["scoring"]["composite"]} for s in near_lows],
-        "top_sectors": [{"sector": s[0], "count": s[1]} for s in top_sectors],
+                       "pct_from_low": s["pct_from_low"], "score": s["scoring"]["composite"],
+                       "sector": s.get("sector")} for s in near_lows],
+        "top_sectors": [{"sector": s[0], "count": s[1]} for s in top_secs],
         "total_indexed": len(stocks),
-        "last_updated": _cache_time.isoformat() if _cache_time else None,
     }
 
+@app.get("/api/education")
+def get_education(category: str = Query(None)):
+    return {"content": get_all_content(category), "categories": list(EDUCATION.keys())}
+
+@app.get("/api/education/{content_id}")
+def get_education_item(content_id: str):
+    for items in EDUCATION.values():
+        for item in items:
+            if item["id"] == content_id: return item
+    raise HTTPException(404, f"Article not found: {content_id}")
 
 @app.post("/api/portfolio/build")
-def build_portfolio_endpoint(
-    profile_id: str = Query(...),
-    capital: float = Query(...),
-    limit: int = Query(None),
-    mode: str = Query("single"),
-):
-    nifty_pe = fetch_nifty_pe()
-
+def build_portfolio_endpoint(profile_id: str = Query(...), capital: float = Query(...),
+                              limit: int = Query(None), mode: str = Query("single")):
+    npe = fetch_nifty_pe()
     if mode == "consensus":
-        return build_consensus_portfolio_fn(capital, nifty_pe, limit)
-
+        return build_consensus(capital, npe, limit)
     if profile_id not in INVESTOR_PROFILES:
         raise HTTPException(400, f"Unknown profile: {profile_id}")
-
-    try:
-        asset_alloc = compute_asset_allocation(profile_id, capital, nifty_pe)
-    except Exception as e:
-        print(f"Asset allocation error: {e}")
-        asset_alloc = {
-            "allocation_pct": {"equity": 70, "gold": 10, "debt": 15, "cash": 5},
-            "allocation_amt": {"equity": int(capital*0.7), "gold": int(capital*0.1), "debt": int(capital*0.15), "cash": int(capital*0.05)},
-            "equity_capital": int(capital * 0.7),
-            "nifty_pe": 22.0, "market_valuation": {"zone": "Fair Value", "color": "#2563eb", "description": "Market at historical average."},
-            "logic": "Balanced allocation based on profile philosophy.",
-            "instruments": {"gold": "Sovereign Gold Bond", "debt": "Liquid Fund", "cash": "Savings Account"},
-            "rebalance_triggers": []
-        }
-    equity_capital = asset_alloc["equity_capital"]
+    alloc = compute_allocation(profile_id, capital, npe)
+    equity_cap = alloc["equity_capital"]
     profile = INVESTOR_PROFILES[profile_id]
     target_n = limit or profile.get("portfolio_size", 15)
-
     with _cache_lock: stocks = list(_cache.values())
-    if not stocks: raise HTTPException(503, "Cache not ready. Try again in a few minutes.")
+    if not stocks: raise HTTPException(503, "Cache not ready. Try again in 2 minutes.")
     with _cache_lock: avgs = dict(_sector_averages)
-
     scored = []
     for s in stocks:
-        ps = score_profile(s, profile_id, avgs)
-        if ps["score"] >= 25:  # Lower threshold - let more stocks through
-            s = dict(s); s["profile_score"] = ps["score"]; s["profile_reasons"] = ps["reasons"]
-            scored.append(s)
+        try:
+            ps = score_profile(s, profile_id, avgs)
+            if ps["score"] >= 35:
+                s = dict(s); s["profile_score"] = ps["score"]; s["profile_reasons"] = ps["reasons"]
+                scored.append(s)
+        except: pass
     scored.sort(key=lambda x: x["profile_score"], reverse=True)
-    top = scored[:target_n]
-    near_misses = scored[target_n:target_n+6]
-    if not top: raise HTTPException(404, "No stocks meet this profile criteria")
-
-    portfolio = get_portfolio_allocation(profile_id, top, equity_capital)
-
+    top = scored[:target_n]; near_misses = scored[target_n:target_n + 6]
+    if not top:
+        raise HTTPException(404, f"No stocks meet {profile['name']} criteria with current data.")
+    portfolio = get_portfolio_allocation(profile_id, top, equity_cap)
     for pos in portfolio["positions"]:
         try:
             stock_data = next((s for s in top if s["symbol"] == pos["symbol"]), {})
-            explanation = generate_stock_explanation(stock_data, profile_id, avgs)
-            pos["full_analysis"] = explanation.get("full_analysis", "")
-            pos["qualifying_metrics"] = explanation.get("qualifying_metrics", [])
-            pos["one_liner"] = explanation.get("one_liner", "")
-        except Exception as e:
-            print(f"Explanation error for {pos.get('symbol')}: {e}")
-            pos["full_analysis"] = f"Selected based on {INVESTOR_PROFILES.get(profile_id, {}).get('name', profile_id)} criteria."
-            pos["qualifying_metrics"] = []
-            pos["one_liner"] = pos.get("why_included", "")
-
-    try:
-        why_not = generate_why_not(profile_id, near_misses, avgs)
-    except Exception as e:
-        print(f"Why-not error: {e}")
-        why_not = []
-
+            exp = explain_stock(stock_data, profile_id, avgs)
+            pos["full_analysis"] = exp["full_analysis"]
+            pos["qualifying_metrics"] = exp["qualifying_metrics"]
+            pos["one_liner"] = exp.get("one_liner", "")
+            pos["why_included"] = pos["one_liner"] or (pos.get("profile_reasons", ["Meets profile criteria"])[0])
+        except:
+            pos["full_analysis"] = f"Selected based on {profile['name']} investment criteria."
+            pos["qualifying_metrics"] = []; pos["one_liner"] = ""; pos["why_included"] = "Meets profile criteria"
+    try: why_not = why_not_list(profile_id, near_misses, avgs)
+    except: why_not = []
     portfolio.update({
         "profile_id": profile_id, "profile_name": profile["name"],
         "profile_philosophy": profile["philosophy"], "profile_bio": profile["bio"],
-        "capital_input": capital, "equity_capital": equity_capital,
-        "asset_allocation": asset_alloc, "why_not": why_not,
-        "generated_at": datetime.now().isoformat(), "mode": "single",
+        "profile_exact_criteria": profile.get("exact_criteria", {}),
+        "capital_input": capital, "equity_capital": equity_cap,
+        "asset_allocation": alloc, "why_not": why_not,
+        "generated_at": datetime.now().isoformat(), "mode": "single"
     })
     return portfolio
 
-
-def build_consensus_portfolio_fn(capital: float, nifty_pe: float, limit: int = None) -> dict:
-    asset_alloc = compute_asset_allocation("parag_parikh", capital, nifty_pe)
-    equity_capital = asset_alloc["equity_capital"]
+def build_consensus(capital: float, npe: float, limit: int = None):
+    alloc = compute_allocation("parag_parikh", capital, npe)
+    equity_cap = alloc["equity_capital"]
     with _cache_lock: stocks = list(_cache.values())
     with _cache_lock: avgs = dict(_sector_averages)
-
-    consensus_scored = []
+    cs = []
     for s in stocks:
-        cs = score_legend_consensus(s, avgs)
-        if cs["tier"]:
-            s = dict(s); s["consensus_score"] = cs["consensus_score"]
-            s["consensus_data"] = cs; s["profile_score"] = cs["consensus_score"]
-            consensus_scored.append(s)
-    consensus_scored.sort(key=lambda x: x["consensus_score"], reverse=True)
-    top = consensus_scored[:limit or 20]
+        try:
+            c = score_consensus(s, avgs)
+            if c["tier"]:
+                s = dict(s); s["consensus_score"] = c["consensus_score"]
+                s["consensus_data"] = c; s["profile_score"] = c["consensus_score"]; cs.append(s)
+        except: pass
+    cs.sort(key=lambda x: x["consensus_score"], reverse=True)
+    top = cs[:limit or 20]
     if not top: raise HTTPException(404, "Not enough consensus stocks found")
-
     total_q = sum(s["consensus_data"]["qualifying_profiles"] for s in top)
-    weights = [s["consensus_data"]["qualifying_profiles"] / total_q for s in top]
-    total_w = sum(weights)
-    weights = [w / total_w for w in weights]
-
+    weights = [s["consensus_data"]["qualifying_profiles"] / (total_q or 1) for s in top]
+    tw = sum(weights); weights = [w / tw for w in weights]
     positions = []
-    for i, (stock, weight) in enumerate(zip(top, weights)):
-        price = stock.get("current_price") or 0
-        shares = int(equity_capital * weight / price) if price > 0 else 0
-        amount = shares * price if price > 0 else equity_capital * weight
-        cs_data = stock["consensus_data"]
-        explanation = generate_stock_explanation(stock, "buffett", avgs)
+    for i, (stock, w) in enumerate(zip(top, weights)):
+        price = stock.get("current_price") or 0; amt = equity_cap * w
+        shares = int(amt / price) if price > 0 else 0; actual = shares * price if price > 0 else amt
+        cd = stock["consensus_data"]
+        try: exp = explain_stock(stock, "buffett", avgs)
+        except: exp = {"full_analysis": "Multi-profile consensus pick.", "qualifying_metrics": []}
         positions.append({
-            "rank": i+1, "symbol": stock["symbol"], "company_name": stock["company_name"],
-            "sector": stock.get("sector","Unknown"), "current_price": price,
-            "weight_pct": round(weight*100,1), "amount": round(amount), "shares": shares,
-            "profile_score": stock["consensus_score"], "consensus_tier": cs_data["tier"],
-            "qualifying_profiles": cs_data["qualifying_profiles"],
-            "top_agreeing_profiles": [{"name": p["profile_name"], "score": p["score"]} for p in cs_data["top_profiles"][:3]],
+            "rank": i + 1, "symbol": stock["symbol"], "company_name": stock["company_name"],
+            "sector": stock.get("sector", "Unknown"), "current_price": price,
+            "weight_pct": round(w * 100, 1), "amount": round(actual), "shares": shares,
+            "profile_score": stock["consensus_score"], "consensus_tier": cd["tier"],
+            "qualifying_profiles": cd["qualifying_profiles"],
+            "top_agreeing_profiles": [{"name": p["profile_name"], "score": p["score"]} for p in cd["top_profiles"][:3]],
             "conviction": stock["conviction"],
-            "why_included": f"{cs_data['qualifying_profiles']} legendary investors agree on this stock",
-            "full_analysis": f"This stock achieves rare multi-profile consensus across {cs_data['qualifying_profiles']} legendary investor frameworks with an average score of {cs_data['avg_score']:.0f}/100. The profiles rating it highest are {', '.join(p['profile_name'] for p in cs_data['top_profiles'][:2])}. Multi-profile consensus is significant because it means the stock simultaneously satisfies value (Graham), quality (Buffett/Marcellus), and growth (RJ/Lynch) criteria — an extremely rare combination in Indian markets.",
-            "qualifying_metrics": explanation["qualifying_metrics"][:4],
-            "one_liner": explanation["one_liner"],
+            "why_included": f"{cd['qualifying_profiles']} of {len(INVESTOR_PROFILES)} legendary investors agree on this stock",
+            "full_analysis": exp["full_analysis"], "qualifying_metrics": exp["qualifying_metrics"][:4],
+            "one_liner": "", "profile_reasons": []
         })
-
-    sector_exposure = {}
+    se = {}
     for pos in positions:
         sec = pos["sector"]
-        if sec != "Unknown": sector_exposure[sec] = round(sector_exposure.get(sec,0)+pos["weight_pct"],1)
-
+        if sec != "Unknown": se[sec] = round(se.get(sec, 0) + pos["weight_pct"], 1)
     return {
-        "positions": positions, "total_stocks": len(positions),
-        "total_capital": capital, "equity_capital": equity_capital,
-        "total_deployed": round(sum(p["amount"] for p in positions)),
-        "sector_exposure": sector_exposure, "asset_allocation": asset_alloc,
-        "portfolio_rationale": f"This Legend Consensus portfolio selects stocks where multiple legendary investors independently agree. Position sizing is weighted by consensus breadth — broader agreement earns larger allocation. These are the rarest, highest-conviction opportunities in Indian markets.",
-        "entry_strategy": "Enter systematically over 3-6 months to average entry prices. The consensus approach reduces single-style risk.",
-        "rebalance_note": "Quarterly review. Replace stocks dropping below 3-profile consensus. Add new consensus entrants.",
-        "why_not": [], "profile_id": "consensus", "profile_name": "Legend Consensus",
-        "profile_philosophy": "The intersection of all legendary investor philosophies — stocks that simultaneously pass value, quality, and growth filters.",
-        "profile_bio": "A meta-strategy finding common ground between 14 legendary investors.",
-        "capital_input": capital, "generated_at": datetime.now().isoformat(), "mode": "consensus",
+        "positions": positions, "total_stocks": len(positions), "total_capital": capital,
+        "equity_capital": equity_cap, "total_deployed": round(sum(p["amount"] for p in positions)),
+        "sector_exposure": se, "asset_allocation": alloc, "why_not": [],
+        "portfolio_rationale": "Legend Consensus selects stocks where multiple legendary investors with different philosophies independently agree.",
+        "entry_strategy": "Enter systematically over 3-6 months. Consensus approach reduces single-style risk.",
+        "rebalance_note": "Quarterly review. Replace stocks dropping below 3-profile consensus.",
+        "profile_id": "consensus", "profile_name": "Legend Consensus",
+        "profile_philosophy": "Intersection of all legendary investor philosophies.",
+        "profile_bio": "A meta-strategy finding common ground between multiple legendary investors.",
+        "profile_exact_criteria": {}, "capital_input": capital,
+        "generated_at": datetime.now().isoformat(), "mode": "consensus"
     }
-
-
